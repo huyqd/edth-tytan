@@ -217,7 +217,7 @@ def compute_distortion_score(transform_matrix):
     return distortion
 
 
-def load_frames_from_dir(directory, extension=None, frame_names=None, desc=None):
+def load_frames_from_dir(directory, extension=None, frame_names=None, frame_indices=None, desc=None):
     """
     Load frames from a directory.
 
@@ -225,6 +225,7 @@ def load_frames_from_dir(directory, extension=None, frame_names=None, desc=None)
         directory: Path to directory containing frames
         extension: Optional file extension filter
         frame_names: Optional list of frame filenames to load (optimization)
+        frame_indices: Optional list of frame indices to load (will try common extensions)
         desc: Optional description for progress bar
 
     Returns:
@@ -233,6 +234,20 @@ def load_frames_from_dir(directory, extension=None, frame_names=None, desc=None)
     dir_path = Path(directory)
     if not dir_path.exists():
         return []
+
+    # If specific frame indices provided, convert to frame names and load
+    if frame_indices is not None:
+        frames = []
+        for frame_idx in tqdm(sorted(frame_indices), desc=desc or "Loading frames", leave=False, disable=len(frame_indices) < 50):
+            # Try different extensions
+            for ext in ['.png', '.jpg', '.jpeg']:
+                frame_path = dir_path / f"{frame_idx:08d}{ext}"
+                if frame_path.exists():
+                    frame = cv2.imread(str(frame_path))
+                    if frame is not None:
+                        frames.append((str(frame_path), frame))
+                    break
+        return frames
 
     # If specific frame names provided, load only those
     if frame_names is not None:
@@ -505,18 +520,15 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
         crop_ratio = compute_largest_inscribed_rect(frame1)
         stab_cropping_ratios.append(crop_ratio)
 
-    # Aggregate metrics
-    metrics.update({
-        # Original video metrics
-        "original_avg_interframe_diff": np.mean(orig_diffs) if orig_diffs else 0,
-        "original_std_interframe_diff": np.std(orig_diffs) if orig_diffs else 0,
-        "original_avg_flow_magnitude": np.mean(orig_flow_mags) if orig_flow_mags else 0,
-        "original_std_flow_magnitude": np.std(orig_flow_mags) if orig_flow_mags else 0,
+    # Aggregate stabilized and improvement metrics
+    stab_diffs_mean = np.mean(stab_diffs) if stab_diffs else 0
+    stab_flow_mags_mean = np.mean(stab_flow_mags) if stab_flow_mags else 0
 
+    metrics.update({
         # Stabilized video metrics
-        "stabilized_avg_interframe_diff": np.mean(stab_diffs) if stab_diffs else 0,
+        "stabilized_avg_interframe_diff": stab_diffs_mean,
         "stabilized_std_interframe_diff": np.std(stab_diffs) if stab_diffs else 0,
-        "stabilized_avg_flow_magnitude": np.mean(stab_flow_mags) if stab_flow_mags else 0,
+        "stabilized_avg_flow_magnitude": stab_flow_mags_mean,
         "stabilized_std_flow_magnitude": np.std(stab_flow_mags) if stab_flow_mags else 0,
         "stabilized_avg_psnr": np.mean(stab_psnrs) if stab_psnrs else 0,
         "stabilized_avg_sharpness": np.mean(stab_sharpness) if stab_sharpness else 0,
@@ -524,12 +536,12 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
 
         # Improvement metrics (lower is better for stability)
         "improvement_interframe_diff": (
-            (orig_diffs_mean - np.mean(stab_diffs)) / orig_diffs_mean * 100
-            if stab_diffs and orig_diffs_mean > 0 else 0
+            (orig_diffs_mean - stab_diffs_mean) / orig_diffs_mean * 100
+            if orig_diffs_mean > 0 else 0
         ),
         "improvement_flow_magnitude": (
-            (orig_flow_mags_mean - np.mean(stab_flow_mags)) / orig_flow_mags_mean * 100
-            if stab_flow_mags and orig_flow_mags_mean > 0 else 0
+            (orig_flow_mags_mean - stab_flow_mags_mean) / orig_flow_mags_mean * 100
+            if orig_flow_mags_mean > 0 else 0
         ),
     })
 
@@ -581,21 +593,21 @@ def evaluate_original(data_dir, split_info=None, split_set=None):
     print(f"Data directory: {data_path}")
     print("-" * 80)
 
-    # Determine which flights to process
-    flights_to_process = {}
+    # Determine which flights to process and which frame indices
+    flights_to_process = {}  # {flight_name: (flight_dir, frame_indices or None)}
 
     if split_info and split_set:
         print(f"Processing split set: {split_set}")
         split_data = split_info['splits'][split_set]
-        for flight_name in split_data.keys():
+        for flight_name, frame_indices in split_data.items():
             flight_dir = data_path / flight_name
-            if flight_dir.exists() and flight_dir.is_dir():
-                flights_to_process[flight_name] = flight_dir
+            if flight_dir.exists() and flight_dir.is_dir() and frame_indices:
+                flights_to_process[flight_name] = (flight_dir, frame_indices)
     else:
         print("Processing all flights")
         for flight_dir in sorted(data_path.iterdir()):
             if flight_dir.is_dir():
-                flights_to_process[flight_dir.name] = flight_dir
+                flights_to_process[flight_dir.name] = (flight_dir, None)  # None = all frames
 
     if not flights_to_process:
         print("No flights found to process.")
@@ -603,12 +615,12 @@ def evaluate_original(data_dir, split_info=None, split_set=None):
 
     all_metrics = []
 
-    for flight_name, flight_dir in tqdm(list(flights_to_process.items()), desc="Processing flights"):
+    for flight_name, (flight_dir, frame_indices) in tqdm(list(flights_to_process.items()), desc="Processing flights"):
         print(f"\n  Processing {flight_name}...")
         print(f"    Loading frames...")
 
-        # Load all frames from this flight
-        original_frames = load_frames_from_dir(flight_dir, desc="    Loading")
+        # Load frames (either specific indices or all)
+        original_frames = load_frames_from_dir(flight_dir, frame_indices=frame_indices, desc="    Loading")
 
         if not original_frames:
             print(f"    Warning: No frames found for {flight_name}")

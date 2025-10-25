@@ -53,7 +53,17 @@ def load_evaluation_results(output_dir, model_name):
         dict or None: Evaluation results if available
     """
     if model_name == "Raw":
-        return None
+        # Try to load original metrics
+        original_metrics_path = Path(output_dir) / "original_metrics.json"
+        if not original_metrics_path.exists():
+            return None
+
+        try:
+            with open(original_metrics_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading original metrics: {e}")
+            return None
 
     eval_path = Path(output_dir) / model_name / "evaluation_results.json"
     if not eval_path.exists():
@@ -83,7 +93,23 @@ def format_metrics_display(eval_results, model_name):
 
     agg = eval_results.get('aggregate_metrics', {})
 
-    # Extract key metrics
+    # Check if this is original metrics (no stabilization)
+    if model_name == "Raw" or eval_results.get('model_name') == 'original':
+        # Format original-only metrics
+        avg_diff = agg.get('avg_interframe_diff', 0)
+        avg_flow = agg.get('avg_flow_magnitude', 0)
+        total_frames = agg.get('total_frames', 0)
+
+        metrics_text = f"""**{model_name} - Original Video Metrics:**
+- **Total Frames:** {total_frames}
+- **Avg Inter-frame Difference:** {avg_diff:.2f}
+- **Avg Optical Flow Magnitude:** {avg_flow:.2f}
+
+_These are baseline metrics for unstabilized video_
+"""
+        return metrics_text
+
+    # Extract stabilization metrics
     diff_improv = agg.get('avg_improvement_interframe_diff', 0)
     flow_improv = agg.get('avg_improvement_flow_magnitude', 0)
     psnr = agg.get('avg_psnr', 0)
@@ -572,7 +598,9 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
         - **Loop**: Enable to continuously loop through frames
         - **Model Comparison**: Select different models in the dropdowns above each image
         - **Raw vs Stabilized**: Select "Raw" to show the original unstabilized frame
-        - **Evaluation Metrics**: Metrics appear below each image if available (run `python src/evaluate.py --model <name>` to generate)
+        - **Evaluation Metrics**: Metrics appear below each image if available
+          - For models: run `python src/evaluate.py --model <name>`
+          - For "Raw": run `python src/evaluate.py --model original --split-set test`
         - The viewer shows only test set frames (from `data/data_split.json`)
         """)
 
