@@ -109,7 +109,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Create video/GIF from image sequences. Supports filtering frames by data split (data/data_split.json)."
     )
-    parser.add_argument("--input-dir", help="Path to images directory or parent directory containing flight subfolders. If omitted, uses output/fusion/<flight>")
+    parser.add_argument("--input-dir", help="Path to images directory or parent directory containing flight subfolders. (Deprecated: prefer --model)")
+    parser.add_argument("--model", help="Model name to use for input images. Use 'original' to read from data/images/<flight>. Otherwise images are read from output/<model>/<flight>.")
     parser.add_argument("flight", nargs="?", help="Flight directory name (e.g., Flight1). If not provided and --input-dir points to a flight folder, the flight name is inferred from the input path")
     parser.add_argument("--output-dir", default="output", help="Output directory (default: output)")
     parser.add_argument("--fps", type=int, default=30, help="Frames per second (default: 30)")
@@ -122,45 +123,60 @@ def main():
     args = parser.parse_args()
 
     # Determine input image directory and flight
-    if args.input_dir:
+    image_dir = None
+    flight_name = args.flight
+
+    if args.model:
+        # Prefer --model when provided
+        model = args.model
+        if not flight_name:
+            parser.error("when using --model you must provide the positional flight name (e.g. Flight1)")
+
+        if model.lower() == "original":
+            # Read from data/images/<flight>
+            image_dir = Path("data") / "images" / flight_name
+            src_label = "original"
+        else:
+            # Read from output/<model>/<flight>
+            image_dir = Path(args.output_dir) / model / flight_name
+            src_label = model
+    elif args.input_dir:
+        # Backwards-compatible behavior: allow passing an explicit directory
         image_dir = Path(args.input_dir)
         # if input_dir points to parent with flight subfolders and flight provided, join them
-        if args.flight and not (image_dir / args.flight).exists():
-            # assume input_dir is root and flight is the folder name
-            image_dir = image_dir
-        elif args.flight and (image_dir / args.flight).exists():
-            image_dir = image_dir / args.flight
-    else:
-        if not args.flight:
-            parser.error("either provide a positional flight name or --input-dir")
-        image_dir = Path(args.output_dir) / "fusion" / args.flight
+        if flight_name and (image_dir / flight_name).exists():
+            image_dir = image_dir / flight_name
+        # infer flight name if not provided
+        flight_name = flight_name or Path(image_dir).name
 
-    # infer flight name if not provided
-    flight_name = args.flight or Path(image_dir).name
-
-    # decide a source label for clearer output naming (e.g., original, fusion)
-    src_label = "videos"
-    image_dir_str = str(image_dir)
-    # If this points to the source dataset images, call it original
-    if "data/images" in image_dir_str or os.path.sep + "images" + os.path.sep in image_dir_str:
-        src_label = "original"
-    else:
-        # If path contains an 'output' component, prefer the directory immediately under output
-        # but skip any 'videos' components (e.g. output/videos/original/Flight1)
-        parts = Path(image_dir).parts
-        if "output" in parts:
-            out_idx = parts.index("output")
-            # pick the first part after 'output' that is not 'videos'
-            chosen = None
-            for p in parts[out_idx + 1 :]:
-                if p and p != "videos":
-                    chosen = p
-                    break
-            if chosen:
-                src_label = chosen
+        # decide a source label for clearer output naming (e.g., original, fusion)
+        image_dir_str = str(image_dir)
+        if "data/images" in image_dir_str or os.path.sep + "images" + os.path.sep in image_dir_str:
+            src_label = "original"
         else:
-            # fallback: use the immediate directory name (e.g., Flight1 -> Flight1)
-            src_label = Path(image_dir).name
+            parts = Path(image_dir).parts
+            if "output" in parts:
+                out_idx = parts.index("output")
+                chosen = None
+                for p in parts[out_idx + 1 :]:
+                    if p and p != "videos":
+                        chosen = p
+                        break
+                if chosen:
+                    src_label = chosen
+                else:
+                    src_label = Path(image_dir).name
+            else:
+                src_label = Path(image_dir).name
+    else:
+        # Default legacy behavior: require flight and read from output/fusion/<flight>
+        if not flight_name:
+            parser.error("either provide --model (preferred) or a positional flight name")
+        image_dir = Path(args.output_dir) / "fusion" / flight_name
+        src_label = "fusion"
+
+    # infer flight name if not provided already
+    flight_name = flight_name or Path(image_dir).name
 
     output_dir = Path(args.output_dir) / "videos" / src_label
     output_dir.mkdir(parents=True, exist_ok=True)
