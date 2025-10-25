@@ -10,6 +10,8 @@ from typing import Optional, Dict, List
 from utils.datasets import create_dataloader
 from model.baseline import stabilize_frames  # Keep for backward compatibility
 from model import BaselineModel, FusionModel, StabilizationModel
+# Import IMU-fixed model (separate module)
+from model.imu_fixed import IMUFixedModel
 
 
 def load_data_split(split_path):
@@ -187,7 +189,7 @@ Examples:
         '--model',
         type=str,
         default='baseline',
-        choices=['baseline', 'fusion'],
+        choices=['baseline', 'fusion', 'imu_fixed'],
         help='Model to use for stabilization (default: baseline)'
     )
 
@@ -234,6 +236,12 @@ Examples:
         # Fusion model requires sensor data, enable it automatically
         if not args.use_sensor_data:
             print("Note: Fusion model requires sensor data. Enabling --use-sensor-data automatically.")
+            args.use_sensor_data = True
+    elif args.model == 'imu_fixed':
+        model = IMUFixedModel()
+        # IMU-fixed approach requires sensor data
+        if not args.use_sensor_data:
+            print("Note: IMU-fixed model requires sensor data. Enabling --use-sensor-data automatically.")
             args.use_sensor_data = True
     else:
         raise ValueError(f"Unknown model: {args.model}")
