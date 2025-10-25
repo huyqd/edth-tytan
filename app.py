@@ -41,6 +41,73 @@ def get_available_models(output_dir):
     return sorted(models)
 
 
+def load_evaluation_results(output_dir, model_name):
+    """
+    Load evaluation results for a model if available.
+
+    Args:
+        output_dir: Path to output directory
+        model_name: Name of the model
+
+    Returns:
+        dict or None: Evaluation results if available
+    """
+    if model_name == "Raw":
+        return None
+
+    eval_path = Path(output_dir) / model_name / "evaluation_results.json"
+    if not eval_path.exists():
+        return None
+
+    try:
+        with open(eval_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading evaluation results for {model_name}: {e}")
+        return None
+
+
+def format_metrics_display(eval_results, model_name):
+    """
+    Format evaluation metrics for display in the UI.
+
+    Args:
+        eval_results: Evaluation results dict (or None)
+        model_name: Name of the model
+
+    Returns:
+        str: Formatted markdown text
+    """
+    if eval_results is None:
+        return f"**{model_name}:** _No evaluation metrics available_"
+
+    agg = eval_results.get('aggregate_metrics', {})
+
+    # Extract key metrics
+    diff_improv = agg.get('avg_improvement_interframe_diff', 0)
+    flow_improv = agg.get('avg_improvement_flow_magnitude', 0)
+    psnr = agg.get('avg_psnr', 0)
+    sharpness = agg.get('avg_sharpness', 0)
+    crop_ratio = agg.get('avg_cropping_ratio', 0)
+
+    # Build formatted string
+    metrics_text = f"""**{model_name} - Evaluation Metrics:**
+- **Inter-frame Diff Improvement:** {diff_improv:.1f}%
+- **Flow Magnitude Improvement:** {flow_improv:.1f}%
+- **Avg PSNR:** {psnr:.2f} dB
+- **Avg Sharpness:** {sharpness:.2f}
+- **Avg Cropping Ratio:** {crop_ratio:.1%}
+"""
+
+    # Add advanced metrics if available
+    if 'avg_stability_score_fft' in agg:
+        metrics_text += f"- **Stability Score (FFT):** {agg['avg_stability_score_fft']:.4f}\n"
+    if 'avg_distortion_score' in agg:
+        metrics_text += f"- **Avg Distortion Score:** {agg['avg_distortion_score']:.4f}\n"
+
+    return metrics_text
+
+
 def get_test_frames(data_dir, split_config):
     """
     Get test set frames organized by flight.
@@ -312,6 +379,7 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                     interactive=True
                 )
                 left_image = gr.Image(label=None, type="numpy")
+                left_metrics = gr.Markdown("", elem_classes="metrics-text")
 
             with gr.Column():
                 right_model = gr.Dropdown(
@@ -321,6 +389,7 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                     interactive=True
                 )
                 right_image = gr.Image(label=None, type="numpy")
+                right_metrics = gr.Markdown("", elem_classes="metrics-text")
 
         # Event handlers
         def update_slider_range(flight_name):
@@ -329,8 +398,17 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             return gr.Slider(maximum=max(0, count - 1), value=0)
 
         def update_comparison(flight_name, frame_pos, left_mod, right_mod):
-            """Update both images when any parameter changes."""
-            return viewer.compare_frames(flight_name, int(frame_pos), left_mod, right_mod)
+            """Update both images and metrics when any parameter changes."""
+            left_img, right_img, info = viewer.compare_frames(flight_name, int(frame_pos), left_mod, right_mod)
+
+            # Load evaluation metrics for both models
+            left_eval = load_evaluation_results(viewer.output_dir, left_mod)
+            right_eval = load_evaluation_results(viewer.output_dir, right_mod)
+
+            left_metrics_text = format_metrics_display(left_eval, left_mod)
+            right_metrics_text = format_metrics_display(right_eval, right_mod)
+
+            return left_img, right_img, info, left_metrics_text, right_metrics_text
 
         def prev_frame(frame_pos):
             """Go to previous frame."""
@@ -352,8 +430,16 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             max_pos = viewer.get_frame_count(flight_name) - 1
             current_pos = int(frame_pos)
 
+            # Load metrics once at start
+            left_eval = load_evaluation_results(viewer.output_dir, left_mod)
+            right_eval = load_evaluation_results(viewer.output_dir, right_mod)
+            left_metrics_text = format_metrics_display(left_eval, left_mod)
+            right_metrics_text = format_metrics_display(right_eval, right_mod)
+
             # Enable pause button, disable play button
             yield (
+                gr.update(),
+                gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(),
@@ -369,12 +455,14 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                     flight_name, current_pos, left_mod, right_mod
                 )
 
-                # Yield updated frame
+                # Yield updated frame (metrics stay the same during playback)
                 yield (
                     left_img,
                     right_img,
                     info,
                     current_pos,
+                    left_metrics_text,
+                    right_metrics_text,
                     gr.update(interactive=False),
                     gr.update(interactive=True)
                 )
@@ -395,6 +483,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
 
             # Playback ended, re-enable play button, disable pause button
             yield (
+                gr.update(),
+                gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(),
@@ -420,7 +510,7 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             component.change(
                 fn=update_comparison,
                 inputs=[flight_dropdown, frame_slider, left_model, right_model],
-                outputs=[left_image, right_image, info_text]
+                outputs=[left_image, right_image, info_text, left_metrics, right_metrics]
             )
 
         # Navigation buttons
@@ -452,6 +542,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                 right_image,
                 info_text,
                 frame_slider,
+                left_metrics,
+                right_metrics,
                 play_btn,
                 pause_btn
             ]
@@ -468,7 +560,7 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
         app.load(
             fn=update_comparison,
             inputs=[flight_dropdown, frame_slider, left_model, right_model],
-            outputs=[left_image, right_image, info_text]
+            outputs=[left_image, right_image, info_text, left_metrics, right_metrics]
         )
 
         gr.Markdown("""
@@ -480,6 +572,7 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
         - **Loop**: Enable to continuously loop through frames
         - **Model Comparison**: Select different models in the dropdowns above each image
         - **Raw vs Stabilized**: Select "Raw" to show the original unstabilized frame
+        - **Evaluation Metrics**: Metrics appear below each image if available (run `python src/evaluate.py --model <name>` to generate)
         - The viewer shows only test set frames (from `data/data_split.json`)
         """)
 
