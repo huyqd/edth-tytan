@@ -284,16 +284,7 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
 
             with gr.Column(scale=1):
                 with gr.Row():
-                    fps_slider = gr.Slider(
-                        minimum=1,
-                        maximum=30,
-                        value=30,
-                        step=1,
-                        label="Playback FPS",
-                        interactive=True,
-                        scale=3
-                    )
-
+                    gr.Markdown("**Playback FPS:**", elem_classes="inline-label")
                     fps_number = gr.Number(
                         value=30,
                         label="",
@@ -351,10 +342,6 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             max_pos = viewer.get_frame_count(flight_name) - 1
             new_pos = min(max_pos, frame_pos + 1)
             return new_pos
-
-        def sync_fps(value):
-            """Sync FPS slider and number input."""
-            return value
 
         # Playback state tracking
         playback_control = {"should_stop": False}
@@ -475,19 +462,6 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             fn=stop_playback,
             inputs=[],
             outputs=[play_btn, pause_btn]
-        )
-
-        # Sync FPS slider and number input
-        fps_slider.change(
-            fn=sync_fps,
-            inputs=[fps_slider],
-            outputs=[fps_number]
-        )
-
-        fps_number.change(
-            fn=sync_fps,
-            inputs=[fps_number],
-            outputs=[fps_slider]
         )
 
         # Load initial comparison
