@@ -3,48 +3,74 @@
 ## Overview
 This task is to build an online (preferably real-time) video stabilization method for UAV footage. We provide framed videos from three flight missions and corresponding sensor logs. The focus is on methods that do not rely on future frames at inference time.
 
-## Setup
-1. Request access to the dataset https://tytantechnologies-my.sharepoint.com/:u:/r/personal/daria_m_tytan-technologies_com/Documents/Hackaton_Oct25/data.zip?csf=1&web=1&e=96pdUg by emailing:
-    - daria.m@tytan-technologies.com
-    - jerge.moreno@tytan-technologies.com  
-    In the email subject put your name, surname and email. You should receive access information in reply.
-2. Extract the downloaded data and place it under the `data` directory in the project folder.
-3. Install the dependencies: e.g. 
+## Quick end-to-end workflow
+
+Below is a compact, recommended flow to go from raw data to evaluating and visualizing stabilized videos. Replace `baseline` with `fusion` (or your model name) where appropriate.
+
+1) Split the data (creates `data/data_split.json` and optional per-flight CSVs)
+
+```bash
+# temporal split (default): 80% train, 10% val, 10% test
+python3 src/split_data.py --strategy temporal --ratios 0.8 0.1 0.1 --output data/data_split.json
 ```
-conda create -n tytan_hack python=3.10
-conda activate tytan_hack
-pip install -r requirements.txt
+
+Output: `data/data_split.json` (and `data/labels_split/{train,val,test}/` if `--split-csv` used).
+
+2) Run inference (generate stabilized frames under `output/<model>/<Flight>/`)
+
+```bash
+# Run the baseline on the test split
+python3 src/inference.py --split data/data_split.json --split-set test --model baseline
 ```
-4. Test the dataloader and visualize data for debugging:
-    - `python test.py`
 
-You can also completely discard this repository and process the data however you like it:)
+Notes:
+- `inference.py` writes stabilized frames as JPG under `output/<model>/<Flight>/` and saves per-flight transform JSONs there.
+- Use `--model fusion` to run the fusion model (fusion will enable sensor data automatically).
 
-## Development
-A baseline implementation is provided as `baseline.py`. It uses optical flow and relies only on image data. Feel free to develop your own stabilization algorithm. Note: online and real-time stabilization (no use of future frames) is much more valuable for this challenge.
+3) Evaluate results (produce `evaluation_results.json`)
 
-## Data
-- Framed videos for 3 flight missions are provided.
-- Sensor data is provided in CSV files and is only partially synchronized — small time shifts may exist between video frames and sensor records.
-- Matching between video frames and sensor data has been done to the best of our ability; improving synchronization can be part of your solution.
-- A `raw` folder is included with more extensive logs and raw video files.
-- No train / val / test split is provioded, you can decide how to use your data.
+```bash
+# Evaluate baseline (compares original -> stabilized), writes to output/baseline/evaluation_results.json
+python3 src/evaluate.py --model baseline --split data/data_split.json --split-set test
+```
 
-### Sensor fields
-The sensor CSVs include the following fields:
-- `ax_mDs2`: acceleration in the x-axis of the body frame, in m/s²  
-- `ay_mDs2`: acceleration in the y-axis of the body frame, in m/s²  
-- `az_mDs2`: acceleration in the z-axis of the body frame, in m/s²  
-- `wx_radDs`: angular rate around the x-axis of the body frame, in rad/s  
-- `wy_radDs`: angular rate around the y-axis of the body frame, in rad/s  
-- `wz_radDs`: angular rate around the z-axis of the body frame, in rad/s  
-- `q_OB = [qw, qx, qy, qz]^T`: components of the orientation quaternion (Hamilton convention)
+Notes:
+- For `--model original` the script computes only original-video metrics and saves `data/original_metrics.json` by default.
+- Evaluation outputs for models are saved to `output/<model>/evaluation_results.json`.
 
-![UAV Frame](vis/uav.jpg)
+4) Create viewable MP4 videos from frames (optional but recommended for quick inspection)
 
-## Notes
-- Prefer online approaches that do not use future frames at inference.
-- Synchronization between sensors and frames may require additional processing; this is a valid area for improvement.
+```bash
+# Create MP4 for a single flight from the original dataset
+python3 src/create_video_from_images.py --model original Flight1 --split test
 
-- Use the provided baseline as a starting point or implement a new method as desired.
+# Create MP4 from a model's output (reads from output/<model>/<Flight>/)
+python3 src/create_video_from_images.py --model baseline Flight1 --split test
+```
+
+Output: `output/videos/<model>/<Flight>.mp4` (now the canonical place the Gradio app looks for videos).
+
+5) Spin up the Gradio app to visually compare original vs stabilized videos
+
+```bash
+# Start the app on the default port
+python3 app.py
+
+# Start on a custom port and create a public share link
+python3 app.py --port 7860 --share
+```
+
+UI tips:
+- Use the model selector to pick `baseline`, `fusion`, or `Raw` (original).
+- Toggle "Show videos" to display pre-rendered MP4s from `output/videos/<model>/<Flight>.mp4` when available. The app falls back to per-frame image streaming when videos are missing.
+
+Troubleshooting
+- If `create_video_from_images.py` creates files with `*_fusion.mp4` names from earlier runs, you can recreate canonical videos by re-running the command above, or create symlinks so the app finds them:
+
+```bash
+mkdir -p output/videos/fusion
+ln -s ../../fusion/Flight1/Flight1_fusion.mp4 output/videos/fusion/Flight1.mp4  # example
+```
+
+If you want, I can add a small helper to auto-migrate existing `*_fusion.mp4` files to the new canonical `output/videos/<model>/<flight>.mp4` names.
 
