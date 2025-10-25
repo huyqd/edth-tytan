@@ -197,6 +197,19 @@ Examples:
         help='Load and pass sensor data to model'
     )
 
+    parser.add_argument(
+        '--profile',
+        action='store_true',
+        help='Enable detailed performance profiling'
+    )
+
+    parser.add_argument(
+        '--max-features',
+        type=int,
+        default=2000,
+        help='Maximum number of features to track (default: 2000). Lower for faster processing.'
+    )
+
     args = parser.parse_args()
 
     # Set default output name to model name if not specified
@@ -211,16 +224,21 @@ Examples:
 
     # Initialize model
     print(f"Initializing model: {args.model}")
+    if args.profile:
+        print("Performance profiling: ENABLED")
+
     if args.model == 'baseline':
-        model = BaselineModel()
+        model = BaselineModel(max_features=args.max_features)
     elif args.model == 'fusion':
-        model = FusionModel()
+        model = FusionModel(max_features=args.max_features, enable_profiling=args.profile)
         # Fusion model requires sensor data, enable it automatically
         if not args.use_sensor_data:
             print("Note: Fusion model requires sensor data. Enabling --use-sensor-data automatically.")
             args.use_sensor_data = True
     else:
         raise ValueError(f"Unknown model: {args.model}")
+
+    print(f"Max features: {args.max_features}")
 
     # Load data split if provided
     split_indices = None
@@ -424,6 +442,38 @@ Examples:
     if args.split:
         print(f"Processed split: {args.split_set}")
         print(f"From split file: {args.split}")
+
+    # Print performance summary for fusion model
+    if args.model == 'fusion' and args.profile:
+        print("\n" + "="*60)
+        print("PERFORMANCE SUMMARY")
+        print("="*60)
+        perf_summary = model.get_performance_summary()
+
+        if 'warping_ms' in perf_summary:
+            warp_stats = perf_summary['warping_ms']
+            print(f"\nWarping Performance (per frame):")
+            print(f"  Mean:      {warp_stats['mean']:6.2f}ms")
+            print(f"  Median:    {warp_stats['median']:6.2f}ms")
+            print(f"  Min:       {warp_stats['min']:6.2f}ms")
+            print(f"  Max:       {warp_stats['max']:6.2f}ms")
+            print(f"  P95:       {warp_stats['p95']:6.2f}ms")
+            print(f"  P99:       {warp_stats['p99']:6.2f}ms")
+
+        if 'total_ms' in perf_summary:
+            total_stats = perf_summary['total_ms']
+            print(f"\nTotal Processing Time (per window):")
+            print(f"  Mean:      {total_stats['mean']:6.2f}ms")
+            print(f"  Median:    {total_stats['median']:6.2f}ms")
+
+        if 'fps' in perf_summary:
+            fps_stats = perf_summary['fps']
+            print(f"\nThroughput:")
+            print(f"  Average:   {fps_stats['mean']:6.1f} FPS")
+            realtime_status = "✓ YES" if fps_stats['realtime_capable_30fps'] else "✗ NO"
+            print(f"  Real-time capable (30 FPS): {realtime_status}")
+
+        print("="*60 + "\n")
 
 
 if __name__ == "__main__":

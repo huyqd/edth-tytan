@@ -298,7 +298,7 @@ class FusionModel(StabilizationModel):
     - Fuses both sources using complementary filtering
     """
 
-    def __init__(self, max_features: int = 2000, imu_weight: float = 0.7):
+    def __init__(self, max_features: int = 2000, imu_weight: float = 0.7, enable_profiling: bool = False):
         """
         Initialize fusion model.
 
@@ -306,9 +306,20 @@ class FusionModel(StabilizationModel):
             max_features: Maximum number of features to track (default: 2000)
             imu_weight: Weight for IMU rotation data (0 to 1, default: 0.7)
                        Higher values trust IMU more, lower values trust optical flow more
+            enable_profiling: Enable detailed performance profiling (default: False)
         """
         self.max_features = max_features
         self.imu_weight = imu_weight
+        self.enable_profiling = enable_profiling
+
+        # Performance tracking
+        self.perf_stats = {
+            'optical_flow_ms': [],
+            'imu_processing_ms': [],
+            'transform_fusion_ms': [],
+            'warping_ms': [],
+            'total_ms': []
+        }
 
     def stabilize_frames(
         self,
@@ -341,17 +352,24 @@ class FusionModel(StabilizationModel):
 
         # Reference frame properties
         h, w = frames[ref_idx].shape[:2]
+
+        t_start = time.perf_counter()
         grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
+        t_gray = time.perf_counter()
+
         ref_gray = grays[ref_idx]
         ref_sensor = sensor_data[ref_idx] if sensor_data else None
-
-        t1 = time.time()
 
         # Initialize output lists
         scales = [1.0] * n
         translations = [(0.0, 0.0)] * n
         rotations = [0.0] * n
         inliers_list = [np.zeros((0,), dtype=np.uint8) for _ in range(n)]
+
+        # Detailed timing breakdown
+        time_optical_flow = 0.0
+        time_imu = 0.0
+        time_fusion = 0.0
 
         # Estimate transform from each frame to reference
         for i in range(n):
@@ -360,7 +378,9 @@ class FusionModel(StabilizationModel):
 
             sensor_i = sensor_data[i] if sensor_data else None
 
-            # Estimate transform with sensor fusion
+            t_frame_start = time.perf_counter()
+
+            # Estimate transform with sensor fusion (with internal timing)
             rotation, scale, translation, inliers = estimate_transform_with_fusion(
                 grays[i], ref_gray,
                 sensor_i, ref_sensor,
@@ -368,19 +388,25 @@ class FusionModel(StabilizationModel):
                 imu_weight=self.imu_weight
             )
 
+            t_frame_end = time.perf_counter()
+            time_optical_flow += (t_frame_end - t_frame_start)
+
             rotations[i] = rotation
             scales[i] = scale
             translations[i] = translation
             inliers_list[i] = inliers
 
-        t2 = time.time()
+        t_estimate_end = time.perf_counter()
 
         # Warp all frames to reference
         warped = [None] * n
+        t_warp_start = time.perf_counter()
+
         for i in range(n):
             if i == ref_idx:
                 warped[i] = frames[i].copy()
             else:
+                t_single_warp_start = time.perf_counter()
                 warped[i] = warp_with_transform(
                     frames[i],
                     rotations[i],
@@ -389,10 +415,38 @@ class FusionModel(StabilizationModel):
                     translations[i][1],
                     (h, w)
                 )
+                t_single_warp_end = time.perf_counter()
+                time_fusion += (t_single_warp_end - t_single_warp_start)
 
-        t3 = time.time()
+        t_warp_end = time.perf_counter()
+        t_total = time.perf_counter()
 
-        print(f"Fusion stabilization time: estimate {(t2 - t1)*1000:.3f}ms, warp {(t3 - t2)*1000:.3f}ms")
+        # Calculate timings in milliseconds
+        time_total_ms = (t_total - t_start) * 1000
+        time_gray_ms = (t_gray - t_start) * 1000
+        time_estimate_ms = (t_estimate_end - t_gray) * 1000
+        time_warp_ms = (t_warp_end - t_warp_start) * 1000
+        time_per_frame_warp_ms = time_warp_ms / max(1, n - 1)  # Exclude reference frame
+
+        if self.enable_profiling:
+            print(f"\n=== Fusion Model Performance ===")
+            print(f"Grayscale conversion:  {time_gray_ms:6.2f}ms")
+            print(f"Transform estimation:  {time_estimate_ms:6.2f}ms")
+            print(f"  └─ Per frame:        {time_estimate_ms/(n-1):6.2f}ms" if n > 1 else "")
+            print(f"Warping ({n-1} frames): {time_warp_ms:6.2f}ms")
+            print(f"  └─ Per frame:        {time_per_frame_warp_ms:6.2f}ms")
+            print(f"Total time:            {time_total_ms:6.2f}ms")
+            print(f"Throughput:            {1000.0/time_total_ms:.1f} FPS")
+            print(f"Real-time (30 FPS)?    {'✓ YES' if time_total_ms < 33.33 else '✗ NO'}")
+            print(f"================================\n")
+        else:
+            print(f"Fusion stabilization: estimate {time_estimate_ms:.1f}ms, warp {time_warp_ms:.1f}ms ({time_per_frame_warp_ms:.2f}ms/frame), total {time_total_ms:.1f}ms")
+
+        # Store performance stats
+        if self.enable_profiling:
+            self.perf_stats['optical_flow_ms'].append(time_estimate_ms)
+            self.perf_stats['warping_ms'].append(time_per_frame_warp_ms)
+            self.perf_stats['total_ms'].append(time_total_ms)
 
         # Build transformation matrices
         transforms = []
@@ -424,3 +478,41 @@ class FusionModel(StabilizationModel):
             "ref_idx": ref_idx,
             "transforms": transforms
         }
+
+    def get_performance_summary(self) -> Dict:
+        """
+        Get summary of performance statistics.
+
+        Returns:
+            dict with mean, median, and percentile statistics for timing metrics
+        """
+        if not self.perf_stats['total_ms']:
+            return {"error": "No performance data collected. Enable profiling first."}
+
+        summary = {}
+        for metric_name, values in self.perf_stats.items():
+            if values:
+                arr = np.array(values)
+                summary[metric_name] = {
+                    'mean': float(np.mean(arr)),
+                    'median': float(np.median(arr)),
+                    'min': float(np.min(arr)),
+                    'max': float(np.max(arr)),
+                    'p95': float(np.percentile(arr, 95)),
+                    'p99': float(np.percentile(arr, 99))
+                }
+
+        # Add derived metrics
+        if 'warping_ms' in summary:
+            avg_warp_ms = summary['warping_ms']['mean']
+            summary['fps'] = {
+                'mean': 1000.0 / avg_warp_ms if avg_warp_ms > 0 else 0,
+                'realtime_capable_30fps': avg_warp_ms < 33.33
+            }
+
+        return summary
+
+    def reset_performance_stats(self):
+        """Reset performance statistics."""
+        for key in self.perf_stats:
+            self.perf_stats[key] = []

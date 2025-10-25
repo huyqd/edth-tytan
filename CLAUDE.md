@@ -32,11 +32,24 @@ python src/test.py
 # Run stabilization inference on test set (default: uses data/data_split.json)
 python src/inference.py --split-set test
 
+# Run with fusion model (combines optical flow + IMU sensor data)
+python src/inference.py --model fusion --split-set test
+
 # Run inference on all data (disable split)
 python src/inference.py --split ""
 
 # Run inference on validation set
 python src/inference.py --split-set val --output-name baseline_val
+
+# Enable performance profiling (shows detailed timing)
+python src/inference.py --model fusion --profile --split-set test
+
+# Fast mode for real-time processing (fewer features)
+python src/inference.py --model fusion --max-features 500 --split-set test
+
+# Performance benchmarking
+python src/benchmark_performance.py  # Test different configurations
+python src/benchmark_performance.py --use-real-data --data-root data  # With real frames
 
 # Evaluate stabilization quality (default: loads data/data_split.json if exists)
 
@@ -155,6 +168,14 @@ CSV files in `data/labels/` contain per-frame sensor readings:
   - Uses `cv2.goodFeaturesToTrack()` + `cv2.calcOpticalFlowPyrLK()` for feature tracking
   - See `src/model/README.md` for detailed algorithm documentation
 
+- **`fusion.py`**: Sensor fusion stabilization model (NEW)
+  - Combines optical flow (visual) + IMU sensor data (quaternions, angular rates)
+  - Uses complementary filtering to fuse rotation estimates
+  - Handles missing sensor data gracefully (falls back to vision-only)
+  - Configurable IMU weight for tuning fusion behavior
+  - Performance profiling support for real-time optimization
+  - See `src/model/README_fusion.md` for detailed documentation
+
 #### Utilities (`src/utils/`)
 
 - **`datasets.py`**: PyTorch dataset for temporal video clips + sensor data
@@ -192,6 +213,16 @@ CSV files in `data/labels/` contain per-frame sensor readings:
   - **Supports data splits**: Default split file is `data/data_split.json`
   - Use `--split-set test/val/train` to choose which set to process
   - Use `--split ""` to disable split and process all data
+  - **Model selection**: `--model baseline` or `--model fusion`
+  - **Performance options**: `--profile` for detailed timing, `--max-features N` to control speed/quality
+  - **Sensor data**: Fusion model automatically enables sensor data loading
+
+- **`benchmark_performance.py`**: Performance testing and optimization (NEW)
+  - Tests different configurations (feature counts, models) for real-time capability
+  - Measures per-frame processing time, FPS, and real-time indicators
+  - Outputs detailed statistics and recommendations
+  - Saves results to JSON for analysis
+  - Supports both synthetic and real frame data
 
 - **`test.py`**: Test dataloader and visualize data
 
@@ -284,8 +315,36 @@ python app.py --port 8080        # Custom port
 - **Online constraint**: Prefer methods that use only past frames (causal filtering). Using future frames reduces real-time viability.
 - **Sensor-frame sync**: Matching between video and sensor logs is approximate. Improving synchronization can be part of the solution.
 - **Data splitting**: Use `split_data.py` to create train/val/test splits with configurable ratios and strategies.
-- The baseline uses only image data (optical flow). Sensor data is loaded but not used in stabilization—this is an opportunity for improvement.
+- **Sensor fusion**: The new `FusionModel` combines optical flow with IMU data for improved stabilization, especially for fast rotations and vibrations.
+- **Performance optimization**: For real-time UAV stabilization, use `--max-features 500-1000` and enable `--profile` to monitor performance. See `docs/PERFORMANCE.md` for detailed optimization guide.
 - **Visualization**: Use `app.py` to launch an interactive viewer for qualitative assessment of stabilization results.
+
+## Performance and Real-Time Processing
+
+For UAV applications, processing speed is critical. The codebase includes comprehensive performance tools:
+
+### Quick Performance Check
+
+```bash
+# Benchmark different configurations
+python src/benchmark_performance.py --use-real-data
+
+# Run inference with profiling
+python src/inference.py --model fusion --profile --max-features 1000 --split-set test
+```
+
+### Real-Time Targets
+
+- **30 FPS**: < 33.33 ms per frame
+- **60 FPS**: < 16.67 ms per frame
+
+### Optimization Options
+
+1. **Reduce features**: `--max-features 500` (faster) vs `--max-features 2000` (better quality)
+2. **Model selection**: `baseline` (faster) vs `fusion` (better for rotations)
+3. **Resolution**: Lower resolution = faster processing
+
+See `docs/PERFORMANCE.md` for comprehensive optimization guide.
 
 ### Evaluation Workflow
 
