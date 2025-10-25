@@ -416,10 +416,10 @@ def evaluate_original_only(original_frames, flight_name):
 
     # Aggregate metrics
     metrics.update({
-        "original_avg_interframe_diff": float(np.mean(orig_diffs)) if orig_diffs else 0,
-        "original_std_interframe_diff": float(np.std(orig_diffs)) if orig_diffs else 0,
-        "original_avg_flow_magnitude": float(np.mean(orig_flow_mags)) if orig_flow_mags else 0,
-        "original_std_flow_magnitude": float(np.std(orig_flow_mags)) if orig_flow_mags else 0,
+        "original_avg_interframe_diff": float(np.mean(orig_diffs)) if orig_diffs else 0.0,
+        "original_std_interframe_diff": float(np.std(orig_diffs)) if orig_diffs else 0.0,
+        "original_avg_flow_magnitude": float(np.mean(orig_flow_mags)) if orig_flow_mags else 0.0,
+        "original_std_flow_magnitude": float(np.std(orig_flow_mags)) if orig_flow_mags else 0.0,
     })
 
     return metrics
@@ -479,14 +479,14 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
             orig_flow_mags.append(flow_mag)
             orig_flow_stds.append(flow_std)
 
-        orig_diffs_mean = np.mean(orig_diffs) if orig_diffs else 0
-        orig_flow_mags_mean = np.mean(orig_flow_mags) if orig_flow_mags else 0
+        orig_diffs_mean = float(np.mean(orig_diffs)) if orig_diffs else 0.0
+        orig_flow_mags_mean = float(np.mean(orig_flow_mags)) if orig_flow_mags else 0.0
 
         metrics.update({
             "original_avg_interframe_diff": orig_diffs_mean,
-            "original_std_interframe_diff": np.std(orig_diffs) if orig_diffs else 0,
+            "original_std_interframe_diff": float(np.std(orig_diffs)) if orig_diffs else 0.0,
             "original_avg_flow_magnitude": orig_flow_mags_mean,
-            "original_std_flow_magnitude": np.std(orig_flow_mags) if orig_flow_mags else 0,
+            "original_std_flow_magnitude": float(np.std(orig_flow_mags)) if orig_flow_mags else 0.0,
         })
 
     # Compute inter-frame metrics for stabilized video
@@ -521,27 +521,27 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
         stab_cropping_ratios.append(crop_ratio)
 
     # Aggregate stabilized and improvement metrics
-    stab_diffs_mean = np.mean(stab_diffs) if stab_diffs else 0
-    stab_flow_mags_mean = np.mean(stab_flow_mags) if stab_flow_mags else 0
+    stab_diffs_mean = float(np.mean(stab_diffs)) if stab_diffs else 0.0
+    stab_flow_mags_mean = float(np.mean(stab_flow_mags)) if stab_flow_mags else 0.0
 
     metrics.update({
         # Stabilized video metrics
         "stabilized_avg_interframe_diff": stab_diffs_mean,
-        "stabilized_std_interframe_diff": np.std(stab_diffs) if stab_diffs else 0,
+        "stabilized_std_interframe_diff": float(np.std(stab_diffs)) if stab_diffs else 0.0,
         "stabilized_avg_flow_magnitude": stab_flow_mags_mean,
-        "stabilized_std_flow_magnitude": np.std(stab_flow_mags) if stab_flow_mags else 0,
-        "stabilized_avg_psnr": np.mean(stab_psnrs) if stab_psnrs else 0,
-        "stabilized_avg_sharpness": np.mean(stab_sharpness) if stab_sharpness else 0,
-        "stabilized_avg_cropping_ratio": np.mean(stab_cropping_ratios) if stab_cropping_ratios else 0,
+        "stabilized_std_flow_magnitude": float(np.std(stab_flow_mags)) if stab_flow_mags else 0.0,
+        "stabilized_avg_psnr": float(np.mean(stab_psnrs)) if stab_psnrs else 0.0,
+        "stabilized_avg_sharpness": float(np.mean(stab_sharpness)) if stab_sharpness else 0.0,
+        "stabilized_avg_cropping_ratio": float(np.mean(stab_cropping_ratios)) if stab_cropping_ratios else 0.0,
 
         # Improvement metrics (lower is better for stability)
-        "improvement_interframe_diff": (
+        "improvement_interframe_diff": float(
             (orig_diffs_mean - stab_diffs_mean) / orig_diffs_mean * 100
-            if orig_diffs_mean > 0 else 0
+            if orig_diffs_mean > 0 else 0.0
         ),
-        "improvement_flow_magnitude": (
+        "improvement_flow_magnitude": float(
             (orig_flow_mags_mean - stab_flow_mags_mean) / orig_flow_mags_mean * 100
-            if orig_flow_mags_mean > 0 else 0
+            if orig_flow_mags_mean > 0 else 0.0
         ),
     })
 
@@ -552,7 +552,7 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
             translations = transform_data['translations']
             rotations = transform_data['rotations']
             stability_score = compute_stability_score_fft(translations, rotations, fps)
-            metrics['stability_score_fft'] = stability_score if stability_score is not None else 0
+            metrics['stability_score_fft'] = float(stability_score) if stability_score is not None else None
         else:
             metrics['stability_score_fft'] = None
 
@@ -565,7 +565,7 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
                     distortion = compute_distortion_score(transform_matrix)
                     if distortion is not None:
                         distortions.append(distortion)
-            metrics['avg_distortion_score'] = np.mean(distortions) if distortions else None
+            metrics['avg_distortion_score'] = float(np.mean(distortions)) if distortions else None
         else:
             metrics['avg_distortion_score'] = None
     else:
@@ -759,21 +759,21 @@ def evaluate_model(model_name, data_dir, output_dir, original_metrics_path=None)
     # Compute aggregate statistics across all flights
     if all_metrics:
         agg_metrics = {
-            "avg_improvement_interframe_diff": np.mean([m["improvement_interframe_diff"] for m in all_metrics]),
-            "avg_improvement_flow_magnitude": np.mean([m["improvement_flow_magnitude"] for m in all_metrics]),
-            "avg_psnr": np.mean([m["stabilized_avg_psnr"] for m in all_metrics if m["stabilized_avg_psnr"] > 0]),
-            "avg_sharpness": np.mean([m["stabilized_avg_sharpness"] for m in all_metrics if m["stabilized_avg_sharpness"] > 0]),
-            "avg_cropping_ratio": np.mean([m["stabilized_avg_cropping_ratio"] for m in all_metrics]),
+            "avg_improvement_interframe_diff": float(np.mean([m["improvement_interframe_diff"] for m in all_metrics])),
+            "avg_improvement_flow_magnitude": float(np.mean([m["improvement_flow_magnitude"] for m in all_metrics])),
+            "avg_psnr": float(np.mean([m["stabilized_avg_psnr"] for m in all_metrics if m["stabilized_avg_psnr"] > 0])),
+            "avg_sharpness": float(np.mean([m["stabilized_avg_sharpness"] for m in all_metrics if m["stabilized_avg_sharpness"] > 0])),
+            "avg_cropping_ratio": float(np.mean([m["stabilized_avg_cropping_ratio"] for m in all_metrics])),
         }
 
         # Add advanced metrics if available
         stability_scores = [m["stability_score_fft"] for m in all_metrics if m.get("stability_score_fft") is not None]
         if stability_scores:
-            agg_metrics["avg_stability_score_fft"] = np.mean(stability_scores)
+            agg_metrics["avg_stability_score_fft"] = float(np.mean(stability_scores))
 
         distortion_scores = [m["avg_distortion_score"] for m in all_metrics if m.get("avg_distortion_score") is not None]
         if distortion_scores:
-            agg_metrics["avg_distortion_score"] = np.mean(distortion_scores)
+            agg_metrics["avg_distortion_score"] = float(np.mean(distortion_scores))
 
         aggregate = {
             "model_name": model_name,

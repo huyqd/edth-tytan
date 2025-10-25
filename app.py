@@ -72,18 +72,24 @@ def load_evaluation_results(output_dir, model_name):
     try:
         with open(eval_path, 'r') as f:
             return json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in {eval_path}")
+        print(f"  Line {e.lineno}, Column {e.colno}: {e.msg}")
+        print(f"  Please re-run: python src/evaluate.py --model {model_name}")
+        return None
     except Exception as e:
         print(f"Error loading evaluation results for {model_name}: {e}")
         return None
 
 
-def format_metrics_display(eval_results, model_name):
+def format_metrics_display(eval_results, model_name, current_flight=None):
     """
     Format evaluation metrics for display in the UI.
 
     Args:
         eval_results: Evaluation results dict (or None)
         model_name: Name of the model
+        current_flight: Optional current flight name to highlight per-flight metrics
 
     Returns:
         str: Formatted markdown text
@@ -92,6 +98,7 @@ def format_metrics_display(eval_results, model_name):
         return f"**{model_name}:** _No evaluation metrics available_"
 
     agg = eval_results.get('aggregate_metrics', {})
+    per_flight = eval_results.get('per_flight_metrics', [])
 
     # Check if this is original metrics (no stabilization)
     if model_name == "Raw" or eval_results.get('model_name') == 'original':
@@ -99,14 +106,31 @@ def format_metrics_display(eval_results, model_name):
         avg_diff = agg.get('avg_interframe_diff', 0)
         avg_flow = agg.get('avg_flow_magnitude', 0)
         total_frames = agg.get('total_frames', 0)
+        num_flights = agg.get('num_flights', len(per_flight))
 
         metrics_text = f"""**{model_name} - Original Video Metrics:**
-- **Total Frames:** {total_frames}
+"""
+
+        # Add per-flight metrics first
+        if per_flight and current_flight:
+            # Find current flight metrics
+            flight_metrics = next((m for m in per_flight if m['flight_name'] == current_flight), None)
+            if flight_metrics:
+                metrics_text += f"""
+**Current Flight ({current_flight}):**
+- **Frames:** {flight_metrics.get('num_frames_original', 0)}
+- **Inter-frame Diff:** {flight_metrics.get('original_avg_interframe_diff', 0):.2f}
+- **Flow Magnitude:** {flight_metrics.get('original_avg_flow_magnitude', 0):.2f}
+
+"""
+
+        # Add aggregate metrics
+        metrics_text += f"""**Aggregate ({num_flights} flights, {total_frames} frames):**
 - **Avg Inter-frame Difference:** {avg_diff:.2f}
 - **Avg Optical Flow Magnitude:** {avg_flow:.2f}
 
-_These are baseline metrics for unstabilized video_
-"""
+_Baseline metrics for unstabilized video_"""
+
         return metrics_text
 
     # Extract stabilization metrics
@@ -115,9 +139,28 @@ _These are baseline metrics for unstabilized video_
     psnr = agg.get('avg_psnr', 0)
     sharpness = agg.get('avg_sharpness', 0)
     crop_ratio = agg.get('avg_cropping_ratio', 0)
+    num_flights = eval_results.get('num_flights', len(per_flight))
 
     # Build formatted string
     metrics_text = f"""**{model_name} - Evaluation Metrics:**
+"""
+
+    # Add per-flight metrics for current flight first
+    if per_flight and current_flight:
+        flight_metrics = next((m for m in per_flight if m['flight_name'] == current_flight), None)
+        if flight_metrics:
+            metrics_text += f"""
+**Current Flight ({current_flight}):**
+- **Frames:** {flight_metrics.get('num_frames_stabilized', 0)}
+- **Diff Improvement:** {flight_metrics.get('improvement_interframe_diff', 0):.1f}%
+- **Flow Improvement:** {flight_metrics.get('improvement_flow_magnitude', 0):.1f}%
+- **PSNR:** {flight_metrics.get('stabilized_avg_psnr', 0):.2f} dB
+- **Crop Ratio:** {flight_metrics.get('stabilized_avg_cropping_ratio', 0):.1%}
+
+"""
+
+    # Add aggregate metrics
+    metrics_text += f"""**Aggregate ({num_flights} flights):**
 - **Inter-frame Diff Improvement:** {diff_improv:.1f}%
 - **Flow Magnitude Improvement:** {flow_improv:.1f}%
 - **Avg PSNR:** {psnr:.2f} dB
@@ -431,8 +474,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             left_eval = load_evaluation_results(viewer.output_dir, left_mod)
             right_eval = load_evaluation_results(viewer.output_dir, right_mod)
 
-            left_metrics_text = format_metrics_display(left_eval, left_mod)
-            right_metrics_text = format_metrics_display(right_eval, right_mod)
+            left_metrics_text = format_metrics_display(left_eval, left_mod, flight_name)
+            right_metrics_text = format_metrics_display(right_eval, right_mod, flight_name)
 
             return left_img, right_img, info, left_metrics_text, right_metrics_text
 
@@ -459,8 +502,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             # Load metrics once at start
             left_eval = load_evaluation_results(viewer.output_dir, left_mod)
             right_eval = load_evaluation_results(viewer.output_dir, right_mod)
-            left_metrics_text = format_metrics_display(left_eval, left_mod)
-            right_metrics_text = format_metrics_display(right_eval, right_mod)
+            left_metrics_text = format_metrics_display(left_eval, left_mod, flight_name)
+            right_metrics_text = format_metrics_display(right_eval, right_mod, flight_name)
 
             # Enable pause button, disable play button
             yield (
