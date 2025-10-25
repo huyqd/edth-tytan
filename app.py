@@ -85,13 +85,14 @@ def load_evaluation_results(output_dir, model_name):
         return None
 
 
-def format_metrics_display(eval_results, model_name, current_flight=None):
+def format_metrics_display(eval_results, model_name, output_dir, current_flight=None):
     """
     Format evaluation metrics for display in the UI.
 
     Args:
         eval_results: Evaluation results dict (or None)
         model_name: Name of the model
+        output_dir: Path to output directory
         current_flight: Optional current flight name to highlight per-flight metrics
 
     Returns:
@@ -135,6 +136,8 @@ def format_metrics_display(eval_results, model_name, current_flight=None):
                     metrics_text += f"- **Sharpness:** {flight_metrics.get('original_avg_sharpness', 0):.2f}\n"
                 if flight_metrics.get('original_avg_cropping_ratio', 0) > 0:
                     metrics_text += f"- **Cropping Ratio:** {flight_metrics.get('original_avg_cropping_ratio', 0):.1%}\n"
+                if flight_metrics.get('original_stability_score') is not None:
+                    metrics_text += f"- **Stability Score:** {flight_metrics.get('original_stability_score', 0):.2f}/100\n"
                 metrics_text += "\n"
 
         # Add aggregate metrics
@@ -189,6 +192,10 @@ def format_metrics_display(eval_results, model_name, current_flight=None):
                 metrics_text += f"- **Sharpness:** {flight_metrics.get('stabilized_avg_sharpness', 0):.2f}\n"
             if flight_metrics.get('stabilized_avg_cropping_ratio', 0) > 0:
                 metrics_text += f"- **Crop Ratio:** {flight_metrics.get('stabilized_avg_cropping_ratio', 0):.1%}\n"
+            if flight_metrics.get('stabilized_stability_score') is not None:
+                orig_stab = flight_metrics.get('original_stability_score', 0)
+                stab_stab = flight_metrics.get('stabilized_stability_score', 0)
+                metrics_text += f"- **Stability Score:** {orig_stab:.2f} → {stab_stab:.2f} (+{stab_stab - orig_stab:.2f})\n"
             metrics_text += "\n"
 
     # Add aggregate metrics
@@ -204,14 +211,48 @@ def format_metrics_display(eval_results, model_name, current_flight=None):
 - **Avg Cropping Ratio:** {crop_ratio:.1%}
 """
 
-    # Add advanced metrics if available
+    # Add stability metrics section
+    metrics_text += "\n**Stability Metrics:**\n"
+    
+    # Simple stability score - need to load original metrics to get original scores
+    stab_stability_scores = [m.get('stabilized_stability_score') for m in per_flight if m.get('stabilized_stability_score') is not None]
+    
+    # Load original metrics to get original stability scores
+    orig_stability_scores = []
+    try:
+        original_metrics_path = Path(output_dir) / "original_metrics.json"
+        if original_metrics_path.exists():
+            with open(original_metrics_path, 'r') as f:
+                orig_data = json.load(f)
+                orig_per_flight = orig_data.get('per_flight_metrics', [])
+                # Match by flight name
+                for stab_m in per_flight:
+                    flight_name = stab_m.get('flight_name')
+                    orig_m = next((m for m in orig_per_flight if m.get('flight_name') == flight_name), None)
+                    if orig_m and orig_m.get('original_stability_score') is not None:
+                        orig_stability_scores.append(orig_m['original_stability_score'])
+    except Exception as e:
+        print(f"Warning: Could not load original stability scores: {e}")
+    
+    if orig_stability_scores and stab_stability_scores and len(orig_stability_scores) == len(stab_stability_scores):
+        import numpy as np
+        avg_orig = np.mean(orig_stability_scores)
+        avg_stab = np.mean(stab_stability_scores)
+        metrics_text += f"- **Simple Score (0-100):** {avg_orig:.2f} → {avg_stab:.2f} (+{avg_stab - avg_orig:.2f})\n"
+    elif stab_stability_scores:
+        # Show only stabilized score if we don't have original
+        import numpy as np
+        avg_stab = np.mean(stab_stability_scores)
+        metrics_text += f"- **Simple Score (0-100):** {avg_stab:.2f} _(original scores not available)_\n"
+    
+    # FFT-based stability score
     if 'avg_stability_score_fft' in agg:
-        metrics_text += f"\n**Advanced Metrics:**\n"
-        metrics_text += f"- **Stability Score (FFT):** {agg['avg_stability_score_fft']:.4f}\n"
+        metrics_text += f"- **FFT-based Score:** {agg['avg_stability_score_fft']:.4f} _(low-freq energy ratio)_\n"
+
+    # Add advanced metrics if available
     if 'avg_distortion_score' in agg:
-        if 'avg_stability_score_fft' not in agg:
-            metrics_text += f"\n**Advanced Metrics:**\n"
-        metrics_text += f"- **Avg Distortion Score:** {agg['avg_distortion_score']:.4f}\n"
+        metrics_text += "\n**Distortion:**\n"
+        metrics_text += f"- **Avg Distortion Score:** {agg['avg_distortion_score']:.4f} _(closer to 1.0 is better)_\n"
 
     return metrics_text
 
@@ -536,8 +577,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             left_eval = load_evaluation_results(viewer.output_dir, left_mod)
             right_eval = load_evaluation_results(viewer.output_dir, right_mod)
 
-            left_metrics_text = format_metrics_display(left_eval, left_mod, flight_name)
-            right_metrics_text = format_metrics_display(right_eval, right_mod, flight_name)
+            left_metrics_text = format_metrics_display(left_eval, left_mod, viewer.output_dir, flight_name)
+            right_metrics_text = format_metrics_display(right_eval, right_mod, viewer.output_dir, flight_name)
 
             info = f"**Flight:** {flight_name} | **Position:** {int(frame_pos) + 1}/{viewer.get_frame_count(flight_name)}"
 
@@ -613,8 +654,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             # Load metrics once at start
             left_eval = load_evaluation_results(viewer.output_dir, left_mod)
             right_eval = load_evaluation_results(viewer.output_dir, right_mod)
-            left_metrics_text = format_metrics_display(left_eval, left_mod, flight_name)
-            right_metrics_text = format_metrics_display(right_eval, right_mod, flight_name)
+            left_metrics_text = format_metrics_display(left_eval, left_mod, viewer.output_dir, flight_name)
+            right_metrics_text = format_metrics_display(right_eval, right_mod, viewer.output_dir, flight_name)
 
             # If using videos, return video sources and do not stream frames
             if use_videos:
@@ -795,8 +836,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             # Load metrics
             left_eval = load_evaluation_results(viewer.output_dir, left_mod)
             right_eval = load_evaluation_results(viewer.output_dir, right_mod)
-            left_metrics_text = format_metrics_display(left_eval, left_mod, flight)
-            right_metrics_text = format_metrics_display(right_eval, right_mod, flight)
+            left_metrics_text = format_metrics_display(left_eval, left_mod, viewer.output_dir, flight)
+            right_metrics_text = format_metrics_display(right_eval, right_mod, viewer.output_dir, flight)
 
             info = f"**Flight:** {flight} | **Frame:** {frame_idx} | **Position:** 1/{viewer.get_frame_count(flight)}"
 

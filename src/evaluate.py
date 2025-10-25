@@ -180,6 +180,42 @@ def compute_cropping_ratio(frame):
     return valid_pixels / total_pixels
 
 
+def compute_stability_score_simple(interframe_diffs, flow_magnitudes):
+    """
+    Compute a simple stability score based on the consistency of motion.
+    Lower variance in inter-frame differences and flow indicates better stability.
+    
+    Args:
+        interframe_diffs: List of inter-frame difference values
+        flow_magnitudes: List of optical flow magnitude values
+    
+    Returns:
+        stability_score: Normalized stability score (0-100, higher is better)
+    """
+    if len(interframe_diffs) < 2 or len(flow_magnitudes) < 2:
+        return None
+    
+    # Coefficient of variation (CV) = std / mean
+    # Lower CV means more stable (less relative variation)
+    diff_mean = np.mean(interframe_diffs)
+    diff_std = np.std(interframe_diffs)
+    diff_cv = diff_std / diff_mean if diff_mean > 0 else 0
+    
+    flow_mean = np.mean(flow_magnitudes)
+    flow_std = np.std(flow_magnitudes)
+    flow_cv = flow_std / flow_mean if flow_mean > 0 else 0
+    
+    # Combined coefficient of variation (average)
+    combined_cv = (diff_cv + flow_cv) / 2.0
+    
+    # Convert to stability score (0-100, higher is better)
+    # CV typically ranges from 0 (perfectly stable) to 2+ (very unstable)
+    # We map this inversely to a 0-100 scale
+    stability_score = max(0, min(100, 100 * (1 - combined_cv / 2.0)))
+    
+    return stability_score
+
+
 def compute_stability_score_fft(translations, rotations, fps=30.0, low_freq_range=(0.5, 2.0)):
     """
     Compute stability score using FFT analysis of motion parameters.
@@ -487,6 +523,9 @@ def compute_frame_sequence_metrics(frames, prefix="", desc="Computing metrics", 
     sharpness_values = [r['sharpness'] for r in results]
     cropping_ratios = [r['crop_ratio'] for r in results]
 
+    # Compute simple stability score
+    stability_score = compute_stability_score_simple(diffs, flow_mags)
+
     # Aggregate metrics
     metrics.update({
         f"{prefix}avg_interframe_diff": float(np.mean(diffs)) if diffs else 0.0,
@@ -496,6 +535,7 @@ def compute_frame_sequence_metrics(frames, prefix="", desc="Computing metrics", 
         f"{prefix}avg_psnr": float(np.mean(psnrs)) if psnrs else 0.0,
         f"{prefix}avg_sharpness": float(np.mean(sharpness_values)) if sharpness_values else 0.0,
         f"{prefix}avg_cropping_ratio": float(np.mean(cropping_ratios)) if cropping_ratios else 0.0,
+        f"{prefix}stability_score": float(stability_score) if stability_score is not None else None,
     })
 
     return metrics
@@ -596,6 +636,8 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
     stab_diff = metrics.get('stabilized_avg_interframe_diff', 0)
     orig_flow = metrics.get('original_avg_flow_magnitude', 0)
     stab_flow = metrics.get('stabilized_avg_flow_magnitude', 0)
+    orig_stability = metrics.get('original_stability_score')
+    stab_stability = metrics.get('stabilized_stability_score')
 
     metrics.update({
         # Improvement metrics (lower is better for stability)
@@ -606,6 +648,12 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
             (orig_flow - stab_flow) / orig_flow * 100 if orig_flow > 0 else 0.0
         ),
     })
+    
+    # Stability score improvement (higher is better, so reverse calculation)
+    if orig_stability is not None and stab_stability is not None:
+        metrics["improvement_stability_score"] = float(stab_stability - orig_stability)
+    else:
+        metrics["improvement_stability_score"] = None
 
     # Advanced metrics (require transformation data)
     if transform_data is not None:
@@ -905,23 +953,29 @@ def print_summary(results):
             print(f"  Avg sharpness: {agg['avg_sharpness']:.2f}")
         if 'avg_cropping_ratio' in agg:
             print(f"  Avg cropping ratio: {agg['avg_cropping_ratio']:.2%}")
+        
+        # Show stability score if available
+        avg_stability_scores = [m.get('original_stability_score') for m in all_metrics if m.get('original_stability_score') is not None]
+        if avg_stability_scores:
+            avg_stability = np.mean(avg_stability_scores)
+            print(f"  Avg stability score: {avg_stability:.2f}/100")
 
         print("\n" + "-" * 80)
         print("PER-FLIGHT RESULTS:")
         print("-" * 80)
-        print(f"{'Flight':<15} {'Frames':<8} {'Diff':<11} {'Flow':<11} {'PSNR':<10} {'Sharp':<11}")
+        print(f"{'Flight':<15} {'Frames':<8} {'Diff':<11} {'Flow':<11} {'PSNR':<10} {'Stability':<11}")
         print("-" * 80)
 
         for m in all_metrics:
             psnr_val = m.get('original_avg_psnr', 0)
-            sharp_val = m.get('original_avg_sharpness', 0)
+            stability_val = m.get('original_stability_score', 0)
             print(
                 f"{m['flight_name']:<15} "
                 f"{m['num_frames_original']:<8} "
                 f"{m['original_avg_interframe_diff']:>10.2f} "
                 f"{m['original_avg_flow_magnitude']:>10.2f} "
                 f"{psnr_val:>9.2f} "
-                f"{sharp_val:>10.2f}"
+                f"{stability_val:>10.2f}"
             )
     else:
         # Model evaluation with comparison to original
@@ -938,6 +992,15 @@ def print_summary(results):
         print(f"  {'-'*35} {'-'*12} {'-'*12} {'-'*12}")
         print(f"  {'Inter-frame Difference':<35} {avg_orig_diff:>12.2f} {avg_stab_diff:>12.2f} {agg['avg_improvement_interframe_diff']:>11.2f}%")
         print(f"  {'Optical Flow Magnitude':<35} {avg_orig_flow:>12.2f} {avg_stab_flow:>12.2f} {agg['avg_improvement_flow_magnitude']:>11.2f}%")
+        
+        # Show stability score comparison if available
+        orig_stability_scores = [m.get('original_stability_score') for m in all_metrics if m.get('original_stability_score') is not None]
+        stab_stability_scores = [m.get('stabilized_stability_score') for m in all_metrics if m.get('stabilized_stability_score') is not None]
+        if orig_stability_scores and stab_stability_scores:
+            avg_orig_stability = np.mean(orig_stability_scores)
+            avg_stab_stability = np.mean(stab_stability_scores)
+            stability_improvement = avg_stab_stability - avg_orig_stability
+            print(f"  {'Stability Score (0-100)':<35} {avg_orig_stability:>12.2f} {avg_stab_stability:>12.2f} {stability_improvement:>11.2f}pts")
 
         print("\n" + "-" * 80)
         print("STABILIZED VIDEO QUALITY METRICS:")
@@ -946,26 +1009,50 @@ def print_summary(results):
         print(f"  Average Sharpness:                  {agg['avg_sharpness']:>8.2f}")
         print(f"  Average Cropping Ratio:             {agg['avg_cropping_ratio']:>8.2%}")
 
-        # Print advanced metrics if available
+        # Print stability scores
+        print("\n" + "-" * 80)
+        print("STABILITY METRICS:")
+        print("-" * 80)
+        
+        # Simple stability score (always available)
+        orig_stability_scores = [m.get('original_stability_score') for m in all_metrics if m.get('original_stability_score') is not None]
+        stab_stability_scores = [m.get('stabilized_stability_score') for m in all_metrics if m.get('stabilized_stability_score') is not None]
+        if orig_stability_scores and stab_stability_scores:
+            avg_orig_stability = np.mean(orig_stability_scores)
+            avg_stab_stability = np.mean(stab_stability_scores)
+            stability_improvement = avg_stab_stability - avg_orig_stability
+            print(f"  Simple Stability Score (0-100):")
+            print(f"    Original:    {avg_orig_stability:>6.2f}")
+            print(f"    Stabilized:  {avg_stab_stability:>6.2f}")
+            print(f"    Improvement: {stability_improvement:>+6.2f} pts")
+        
+        # FFT-based stability score (when transformation data available)
         if 'avg_stability_score_fft' in agg:
-            print(f"  Stability Score (FFT):              {agg['avg_stability_score_fft']:>8.4f}")
+            print(f"\n  FFT-based Stability Score:          {agg['avg_stability_score_fft']:>8.4f}")
+            print(f"    (Ratio of low-freq to total energy, higher is better)")
+        
+        # Distortion score
         if 'avg_distortion_score' in agg:
-            print(f"  Average Distortion Score:           {agg['avg_distortion_score']:>8.4f}")
+            print(f"\n  Average Distortion Score:           {agg['avg_distortion_score']:>8.4f}")
+            print(f"    (Non-rigid warping, closer to 1.0 is better)")
 
         print("\n" + "-" * 80)
         print("PER-FLIGHT RESULTS:")
         print("-" * 80)
-        print(f"{'Flight':<15} {'Frames':<8} {'Orig Diff':<11} {'Stab Diff':<11} {'Improv%':<9} {'PSNR':<10} {'Crop%':<8}")
+        print(f"{'Flight':<15} {'Frames':<8} {'Improv%':<9} {'PSNR':<10} {'Stability':<12} {'StabFFT':<10} {'Crop%':<8}")
         print("-" * 80)
 
         for m in all_metrics:
+            stability_val = m.get('stabilized_stability_score', 0)
+            fft_val = m.get('stability_score_fft')
+            fft_str = f"{fft_val:.4f}" if fft_val is not None else "N/A"
             print(
                 f"{m['flight_name']:<15} "
                 f"{m['num_frames_stabilized']:<8} "
-                f"{m.get('original_avg_interframe_diff', 0):>10.2f} "
-                f"{m.get('stabilized_avg_interframe_diff', 0):>10.2f} "
                 f"{m.get('improvement_interframe_diff', 0):>8.1f}% "
                 f"{m.get('stabilized_avg_psnr', 0):>9.2f} "
+                f"{stability_val:>11.2f} "
+                f"{fft_str:>9} "
                 f"{m.get('stabilized_avg_cropping_ratio', 0):>7.1%}"
             )
 
