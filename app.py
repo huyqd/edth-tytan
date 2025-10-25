@@ -33,9 +33,12 @@ def get_available_models(output_dir):
     if not output_path.exists():
         return []
 
+    # Exclude special directories that are not models
+    exclude_dirs = {'videos', 'vis', 'cache', 'temp'}
+
     models = []
     for model_dir in output_path.iterdir():
-        if model_dir.is_dir():
+        if model_dir.is_dir() and model_dir.name not in exclude_dirs:
             models.append(model_dir.name)
 
     return sorted(models)
@@ -438,6 +441,12 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                         scale=1
                     )
 
+                    show_videos = gr.Checkbox(
+                        label="Show videos (if available)",
+                        value=False,
+                        interactive=True,
+                        scale=1
+                    )
         # Main comparison view: dropdowns above their respective images
         with gr.Row():
             with gr.Column():
@@ -447,7 +456,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                     value="Raw",
                     interactive=True
                 )
-                left_image = gr.Image(label=None, type="numpy")
+                left_image = gr.Image(label=None, type="numpy", visible=True)
+                left_video = gr.Video(label=None, visible=False, autoplay=True)
                 left_metrics = gr.Markdown("", elem_classes="metrics-text")
 
             with gr.Column():
@@ -457,7 +467,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                     value=viewer.available_models[0] if viewer.available_models else "Raw",
                     interactive=True
                 )
-                right_image = gr.Image(label=None, type="numpy")
+                right_image = gr.Image(label=None, type="numpy", visible=True)
+                right_video = gr.Video(label=None, visible=False, autoplay=True)
                 right_metrics = gr.Markdown("", elem_classes="metrics-text")
 
         # Event handlers
@@ -466,18 +477,82 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             count = viewer.get_frame_count(flight_name)
             return gr.Slider(maximum=max(0, count - 1), value=0)
 
-        def update_comparison(flight_name, frame_pos, left_mod, right_mod):
-            """Update both images and metrics when any parameter changes."""
-            left_img, right_img, info = viewer.compare_frames(flight_name, int(frame_pos), left_mod, right_mod)
+        def _get_video_path_for_model(model_name, flight_name):
+            """Return absolute path to pre-rendered video for a model+flight if it exists."""
+            out_videos = Path(viewer.output_dir) / "videos"
+            if model_name == "Raw":
+                p = out_videos / "original" / f"{flight_name}.mp4"
+                if p.exists():
+                    return str(p.absolute())
+                return None
 
-            # Load evaluation metrics for both models
+            # model_name may match a folder under output/videos (e.g., baseline, fusion)
+            candidate = out_videos / model_name / f"{flight_name}.mp4"
+            if candidate.exists():
+                return str(candidate.absolute())
+
+            return None
+
+
+        def update_comparison(flight_name, frame_pos, left_mod, right_mod, use_videos):
+            """Update images/videos and metrics when any parameter changes."""
+            # Prepare metrics
             left_eval = load_evaluation_results(viewer.output_dir, left_mod)
             right_eval = load_evaluation_results(viewer.output_dir, right_mod)
 
             left_metrics_text = format_metrics_display(left_eval, left_mod, flight_name)
             right_metrics_text = format_metrics_display(right_eval, right_mod, flight_name)
 
-            return left_img, right_img, info, left_metrics_text, right_metrics_text
+            info = f"**Flight:** {flight_name} | **Position:** {int(frame_pos) + 1}/{viewer.get_frame_count(flight_name)}"
+
+            if use_videos:
+                # Try to find videos for left and right
+                left_vid = _get_video_path_for_model(left_mod, flight_name)
+                right_vid = _get_video_path_for_model(right_mod, flight_name)
+
+                # Debug output
+                print(f"[VIDEO MODE] Left: {left_mod} -> {left_vid}")
+                print(f"[VIDEO MODE] Right: {right_mod} -> {right_vid}")
+
+                # Update info to indicate video mode
+                video_status = []
+                if left_vid:
+                    video_status.append("Left: ✓")
+                else:
+                    video_status.append("Left: ✗ (no video)")
+                if right_vid:
+                    video_status.append("Right: ✓")
+                else:
+                    video_status.append("Right: ✗ (no video)")
+
+                info = f"**Flight:** {flight_name} | **Video Mode** | {' | '.join(video_status)}"
+
+                # Hide image components and show video components with proper paths
+                return (
+                    gr.update(visible=False),  # left_image
+                    gr.update(value=left_vid, visible=True) if left_vid else gr.update(visible=True),  # left_video
+                    gr.update(visible=False),  # right_image
+                    gr.update(value=right_vid, visible=True) if right_vid else gr.update(visible=True),  # right_video
+                    info,  # info_text
+                    left_metrics_text,  # left_metrics
+                    right_metrics_text  # right_metrics
+                )
+
+            # Otherwise show images as before
+            frame_idx, raw_frame_path = viewer.get_frame_info(flight_name, int(frame_pos))
+            left_path = raw_frame_path if left_mod == "Raw" else get_stabilized_frame(viewer.output_dir, left_mod, flight_name, frame_idx)
+            right_path = raw_frame_path if right_mod == "Raw" else get_stabilized_frame(viewer.output_dir, right_mod, flight_name, frame_idx)
+
+            left_img = load_and_prepare_image(left_path)
+            right_img = load_and_prepare_image(right_path)
+
+            # Ensure image components visible and videos hidden
+            left_img_update = gr.update(value=left_img, visible=True)
+            right_img_update = gr.update(value=right_img, visible=True)
+            left_vid_update = gr.update(visible=False)
+            right_vid_update = gr.update(visible=False)
+
+            return left_img_update, left_vid_update, right_img_update, right_vid_update, info, left_metrics_text, right_metrics_text
 
         def prev_frame(frame_pos):
             """Go to previous frame."""
@@ -493,8 +568,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
         # Playback state tracking
         playback_control = {"should_stop": False}
 
-        def start_playback(flight_name, frame_pos, fps, loop, left_mod, right_mod):
-            """Start video playback."""
+        def start_playback(flight_name, frame_pos, fps, loop, left_mod, right_mod, use_videos):
+            """Start video playback. If use_videos is True, return the video paths and skip frame streaming."""
             playback_control["should_stop"] = False
             max_pos = viewer.get_frame_count(flight_name) - 1
             current_pos = int(frame_pos)
@@ -505,16 +580,47 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             left_metrics_text = format_metrics_display(left_eval, left_mod, flight_name)
             right_metrics_text = format_metrics_display(right_eval, right_mod, flight_name)
 
+            # If using videos, return video sources and do not stream frames
+            if use_videos:
+                # Use the existing helper function for consistency
+                left_vid = _get_video_path_for_model(left_mod, flight_name)
+                right_vid = _get_video_path_for_model(right_mod, flight_name)
+
+                # Hide images, show videos if available
+                left_img_update = gr.update(visible=False)
+                right_img_update = gr.update(visible=False)
+                left_vid_update = gr.update(value=left_vid, visible=bool(left_vid))
+                right_vid_update = gr.update(value=right_vid, visible=bool(right_vid))
+
+                # Return a single update (metrics unchanged)
+                yield (
+                    left_img_update,
+                    left_vid_update,
+                    right_img_update,
+                    right_vid_update,
+                    f"**Flight:** {flight_name}",
+                    gr.update(value=int(frame_pos)),
+                    gr.update(value=left_metrics_text),
+                    gr.update(value=right_metrics_text),
+                    gr.update(interactive=False),
+                    gr.update(interactive=True),
+                )
+
+                return
+
+            # Otherwise perform frame-by-frame streaming as before
             # Enable pause button, disable play button
             yield (
                 gr.update(),
+                gr.update(visible=False),
                 gr.update(),
+                gr.update(visible=False),
                 gr.update(),
-                gr.update(),
+                gr.update(value=int(frame_pos)),
                 gr.update(),
                 gr.update(),
                 gr.update(interactive=False),
-                gr.update(interactive=True)
+                gr.update(interactive=True),
             )
 
             # Play through frames
@@ -527,13 +633,15 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                 # Yield updated frame (metrics stay the same during playback)
                 yield (
                     left_img,
+                    gr.update(visible=False),
                     right_img,
+                    gr.update(visible=False),
                     info,
-                    current_pos,
+                    int(current_pos),
                     left_metrics_text,
                     right_metrics_text,
                     gr.update(interactive=False),
-                    gr.update(interactive=True)
+                    gr.update(interactive=True),
                 )
 
                 # Sleep based on FPS
@@ -553,13 +661,15 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             # Playback ended, re-enable play button, disable pause button
             yield (
                 gr.update(),
+                gr.update(visible=False),
                 gr.update(),
+                gr.update(visible=False),
                 gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(interactive=True),
-                gr.update(interactive=False)
+                gr.update(interactive=False),
             )
 
         def stop_playback():
@@ -574,12 +684,12 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             outputs=[frame_slider]
         )
 
-        # Update comparison when any control changes
-        for component in [flight_dropdown, frame_slider, left_model, right_model]:
+        # Update comparison when any control changes (include show_videos)
+        for component in [flight_dropdown, frame_slider, left_model, right_model, show_videos]:
             component.change(
                 fn=update_comparison,
-                inputs=[flight_dropdown, frame_slider, left_model, right_model],
-                outputs=[left_image, right_image, info_text, left_metrics, right_metrics]
+                inputs=[flight_dropdown, frame_slider, left_model, right_model, show_videos],
+                outputs=[left_image, left_video, right_image, right_video, info_text, left_metrics, right_metrics]
             )
 
         # Navigation buttons
@@ -604,17 +714,20 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                 fps_number,
                 loop_checkbox,
                 left_model,
-                right_model
+                right_model,
+                show_videos,
             ],
             outputs=[
                 left_image,
+                left_video,
                 right_image,
+                right_video,
                 info_text,
                 frame_slider,
                 left_metrics,
                 right_metrics,
                 play_btn,
-                pause_btn
+                pause_btn,
             ]
         )
 
@@ -625,11 +738,46 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             outputs=[play_btn, pause_btn]
         )
 
-        # Load initial comparison
+        # Load initial comparison (default to frame mode, not video mode)
+        def initial_load():
+            """Load initial state - always start with frame view."""
+            flight = viewer.get_flight_names()[0] if viewer.get_flight_names() else None
+            if not flight:
+                return None, gr.update(visible=False), None, gr.update(visible=False), "No flights available", "", ""
+
+            left_mod = "Raw"
+            right_mod = viewer.available_models[0] if viewer.available_models else "Raw"
+
+            # Load initial frame
+            frame_idx, raw_frame_path = viewer.get_frame_info(flight, 0)
+            left_path = raw_frame_path
+            right_path = raw_frame_path if right_mod == "Raw" else get_stabilized_frame(viewer.output_dir, right_mod, flight, frame_idx)
+
+            left_img = load_and_prepare_image(left_path)
+            right_img = load_and_prepare_image(right_path)
+
+            # Load metrics
+            left_eval = load_evaluation_results(viewer.output_dir, left_mod)
+            right_eval = load_evaluation_results(viewer.output_dir, right_mod)
+            left_metrics_text = format_metrics_display(left_eval, left_mod, flight)
+            right_metrics_text = format_metrics_display(right_eval, right_mod, flight)
+
+            info = f"**Flight:** {flight} | **Frame:** {frame_idx} | **Position:** 1/{viewer.get_frame_count(flight)}"
+
+            return (
+                gr.update(value=left_img, visible=True),
+                gr.update(visible=False),
+                gr.update(value=right_img, visible=True),
+                gr.update(visible=False),
+                info,
+                left_metrics_text,
+                right_metrics_text
+            )
+
         app.load(
-            fn=update_comparison,
-            inputs=[flight_dropdown, frame_slider, left_model, right_model],
-            outputs=[left_image, right_image, info_text, left_metrics, right_metrics]
+            fn=initial_load,
+            inputs=[],
+            outputs=[left_image, left_video, right_image, right_video, info_text, left_metrics, right_metrics]
         )
 
         gr.Markdown("""
@@ -637,6 +785,9 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
         ### Tips
         - **Single Frame**: Use the slider or ◀ ▶ buttons to browse frames
         - **Video Playback**: Click "▶ Play" to play through frames as a video
+        - **Rendered Videos**: Check "Show videos (if available)" to display pre-rendered videos from `output/videos/`
+          - Videos must be in: `output/videos/original/` for Raw, `output/videos/{model}/` for models
+          - Video format: `{FlightName}.mp4`
         - **Playback Speed**: Adjust FPS (1-30) to control playback speed
         - **Loop**: Enable to continuously loop through frames
         - **Model Comparison**: Select different models in the dropdowns above each image

@@ -33,12 +33,33 @@ def create_video_from_images(image_dir, output_path, fps=30):
     first_image = cv2.imread(image_files[0])
     height, width, _ = first_image.shape
 
-    # Create video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # or 'XVID' for .avi
-    video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    # Create video writer with H.264 codec for better browser compatibility
+    # Try H.264 codecs in order of preference
+    codecs_to_try = [
+        ('avc1', 'H.264 (avc1)'),  # H.264 - best browser support
+        ('H264', 'H.264 (H264)'),  # Alternative H.264 identifier
+        ('X264', 'H.264 (X264)'),  # Another H.264 variant
+        ('mp4v', 'MPEG-4 (mp4v)')  # Fallback to original
+    ]
+
+    video_writer = None
+    codec_used = None
+
+    for codec, codec_name in codecs_to_try:
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        test_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        if test_writer.isOpened():
+            video_writer = test_writer
+            codec_used = codec_name
+            break
+        test_writer.release()
+
+    if video_writer is None:
+        print(f"ERROR: Could not initialize video writer with any codec")
+        return
 
     print(f"Creating video: {output_path}")
-    print(f"Resolution: {width}x{height}, FPS: {fps}")
+    print(f"Resolution: {width}x{height}, FPS: {fps}, Codec: {codec_used}")
 
     for i, image_file in enumerate(image_files):
         if i % 100 == 0:
@@ -168,13 +189,8 @@ def main():
 
     # prepare output path
     safe_flight = flight_name.replace("/", "_")
-    # choose filename depending on source label
-    if src_label == "original":
-        filename_base = f"{safe_flight}"
-    elif src_label == "fusion":
-        filename_base = f"{safe_flight}_fusion"
-    else:
-        filename_base = f"{safe_flight}"
+    # choose filename base (do not append special suffixes like '_fusion')
+    filename_base = f"{safe_flight}"
 
     if args.format == "mp4":
         output_path = output_dir / f"{filename_base}.mp4"
