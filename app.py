@@ -33,9 +33,12 @@ def get_available_models(output_dir):
     if not output_path.exists():
         return []
 
+    # Exclude special directories that are not models
+    exclude_dirs = {'videos', 'vis', 'cache', 'temp'}
+
     models = []
     for model_dir in output_path.iterdir():
-        if model_dir.is_dir():
+        if model_dir.is_dir() and model_dir.name not in exclude_dirs:
             models.append(model_dir.name)
 
     return sorted(models)
@@ -82,13 +85,14 @@ def load_evaluation_results(output_dir, model_name):
         return None
 
 
-def format_metrics_display(eval_results, model_name, current_flight=None):
+def format_metrics_display(eval_results, model_name, output_dir, current_flight=None):
     """
     Format evaluation metrics for display in the UI.
 
     Args:
         eval_results: Evaluation results dict (or None)
         model_name: Name of the model
+        output_dir: Path to output directory
         current_flight: Optional current flight name to highlight per-flight metrics
 
     Returns:
@@ -105,6 +109,9 @@ def format_metrics_display(eval_results, model_name, current_flight=None):
         # Format original-only metrics
         avg_diff = agg.get('avg_interframe_diff', 0)
         avg_flow = agg.get('avg_flow_magnitude', 0)
+        avg_psnr = agg.get('avg_psnr', 0)
+        avg_sharpness = agg.get('avg_sharpness', 0)
+        avg_cropping = agg.get('avg_cropping_ratio', 0)
         total_frames = agg.get('total_frames', 0)
         num_flights = agg.get('num_flights', len(per_flight))
 
@@ -119,17 +126,34 @@ def format_metrics_display(eval_results, model_name, current_flight=None):
                 metrics_text += f"""
 **Current Flight ({current_flight}):**
 - **Frames:** {flight_metrics.get('num_frames_original', 0)}
-- **Inter-frame Diff:** {flight_metrics.get('original_avg_interframe_diff', 0):.2f}
-- **Flow Magnitude:** {flight_metrics.get('original_avg_flow_magnitude', 0):.2f}
-
+- **Inter-frame Diff:** {flight_metrics.get('original_avg_interframe_diff', 0):.2f} ± {flight_metrics.get('original_std_interframe_diff', 0):.2f}
+- **Flow Magnitude:** {flight_metrics.get('original_avg_flow_magnitude', 0):.2f} ± {flight_metrics.get('original_std_flow_magnitude', 0):.2f}
 """
+                # Add optional metrics if available
+                if flight_metrics.get('original_avg_psnr', 0) > 0:
+                    metrics_text += f"- **PSNR:** {flight_metrics.get('original_avg_psnr', 0):.2f} dB\n"
+                if flight_metrics.get('original_avg_sharpness', 0) > 0:
+                    metrics_text += f"- **Sharpness:** {flight_metrics.get('original_avg_sharpness', 0):.2f}\n"
+                if flight_metrics.get('original_avg_cropping_ratio', 0) > 0:
+                    metrics_text += f"- **Cropping Ratio:** {flight_metrics.get('original_avg_cropping_ratio', 0):.1%}\n"
+                if flight_metrics.get('original_stability_score') is not None:
+                    metrics_text += f"- **Stability Score:** {flight_metrics.get('original_stability_score', 0):.2f}/100\n"
+                metrics_text += "\n"
 
         # Add aggregate metrics
         metrics_text += f"""**Aggregate ({num_flights} flights, {total_frames} frames):**
 - **Avg Inter-frame Difference:** {avg_diff:.2f}
 - **Avg Optical Flow Magnitude:** {avg_flow:.2f}
+"""
+        # Add optional aggregate metrics if available
+        if avg_psnr > 0:
+            metrics_text += f"- **Avg PSNR:** {avg_psnr:.2f} dB\n"
+        if avg_sharpness > 0:
+            metrics_text += f"- **Avg Sharpness:** {avg_sharpness:.2f}\n"
+        if avg_cropping > 0:
+            metrics_text += f"- **Avg Cropping Ratio:** {avg_cropping:.1%}\n"
 
-_Baseline metrics for unstabilized video_"""
+        metrics_text += "\n_Baseline metrics for unstabilized video_"
 
         return metrics_text
 
@@ -154,25 +178,81 @@ _Baseline metrics for unstabilized video_"""
 - **Frames:** {flight_metrics.get('num_frames_stabilized', 0)}
 - **Diff Improvement:** {flight_metrics.get('improvement_interframe_diff', 0):.1f}%
 - **Flow Improvement:** {flight_metrics.get('improvement_flow_magnitude', 0):.1f}%
-- **PSNR:** {flight_metrics.get('stabilized_avg_psnr', 0):.2f} dB
-- **Crop Ratio:** {flight_metrics.get('stabilized_avg_cropping_ratio', 0):.1%}
-
 """
+            # Original metrics
+            if flight_metrics.get('original_avg_interframe_diff', 0) > 0:
+                metrics_text += f"- **Original Diff:** {flight_metrics.get('original_avg_interframe_diff', 0):.2f} → **Stabilized:** {flight_metrics.get('stabilized_avg_interframe_diff', 0):.2f}\n"
+            if flight_metrics.get('original_avg_flow_magnitude', 0) > 0:
+                metrics_text += f"- **Original Flow:** {flight_metrics.get('original_avg_flow_magnitude', 0):.2f} → **Stabilized:** {flight_metrics.get('stabilized_avg_flow_magnitude', 0):.2f}\n"
+            
+            # Quality metrics
+            if flight_metrics.get('stabilized_avg_psnr', 0) > 0:
+                metrics_text += f"- **PSNR:** {flight_metrics.get('stabilized_avg_psnr', 0):.2f} dB\n"
+            if flight_metrics.get('stabilized_avg_sharpness', 0) > 0:
+                metrics_text += f"- **Sharpness:** {flight_metrics.get('stabilized_avg_sharpness', 0):.2f}\n"
+            if flight_metrics.get('stabilized_avg_cropping_ratio', 0) > 0:
+                metrics_text += f"- **Crop Ratio:** {flight_metrics.get('stabilized_avg_cropping_ratio', 0):.1%}\n"
+            if flight_metrics.get('stabilized_stability_score') is not None:
+                orig_stab = flight_metrics.get('original_stability_score', 0)
+                stab_stab = flight_metrics.get('stabilized_stability_score', 0)
+                metrics_text += f"- **Stability Score:** {orig_stab:.2f} → {stab_stab:.2f} (+{stab_stab - orig_stab:.2f})\n"
+            metrics_text += "\n"
 
     # Add aggregate metrics
     metrics_text += f"""**Aggregate ({num_flights} flights):**
-- **Inter-frame Diff Improvement:** {diff_improv:.1f}%
-- **Flow Magnitude Improvement:** {flow_improv:.1f}%
+
+**Improvements:**
+- **Inter-frame Diff:** {diff_improv:.1f}%
+- **Flow Magnitude:** {flow_improv:.1f}%
+
+**Quality Metrics:**
 - **Avg PSNR:** {psnr:.2f} dB
 - **Avg Sharpness:** {sharpness:.2f}
 - **Avg Cropping Ratio:** {crop_ratio:.1%}
 """
 
-    # Add advanced metrics if available
+    # Add stability metrics section
+    metrics_text += "\n**Stability Metrics:**\n"
+    
+    # Simple stability score - need to load original metrics to get original scores
+    stab_stability_scores = [m.get('stabilized_stability_score') for m in per_flight if m.get('stabilized_stability_score') is not None]
+    
+    # Load original metrics to get original stability scores
+    orig_stability_scores = []
+    try:
+        original_metrics_path = Path(output_dir) / "original_metrics.json"
+        if original_metrics_path.exists():
+            with open(original_metrics_path, 'r') as f:
+                orig_data = json.load(f)
+                orig_per_flight = orig_data.get('per_flight_metrics', [])
+                # Match by flight name
+                for stab_m in per_flight:
+                    flight_name = stab_m.get('flight_name')
+                    orig_m = next((m for m in orig_per_flight if m.get('flight_name') == flight_name), None)
+                    if orig_m and orig_m.get('original_stability_score') is not None:
+                        orig_stability_scores.append(orig_m['original_stability_score'])
+    except Exception as e:
+        print(f"Warning: Could not load original stability scores: {e}")
+    
+    if orig_stability_scores and stab_stability_scores and len(orig_stability_scores) == len(stab_stability_scores):
+        import numpy as np
+        avg_orig = np.mean(orig_stability_scores)
+        avg_stab = np.mean(stab_stability_scores)
+        metrics_text += f"- **Simple Score (0-100):** {avg_orig:.2f} → {avg_stab:.2f} (+{avg_stab - avg_orig:.2f})\n"
+    elif stab_stability_scores:
+        # Show only stabilized score if we don't have original
+        import numpy as np
+        avg_stab = np.mean(stab_stability_scores)
+        metrics_text += f"- **Simple Score (0-100):** {avg_stab:.2f} _(original scores not available)_\n"
+    
+    # FFT-based stability score
     if 'avg_stability_score_fft' in agg:
-        metrics_text += f"- **Stability Score (FFT):** {agg['avg_stability_score_fft']:.4f}\n"
+        metrics_text += f"- **FFT-based Score:** {agg['avg_stability_score_fft']:.4f} _(low-freq energy ratio)_\n"
+
+    # Add advanced metrics if available
     if 'avg_distortion_score' in agg:
-        metrics_text += f"- **Avg Distortion Score:** {agg['avg_distortion_score']:.4f}\n"
+        metrics_text += "\n**Distortion:**\n"
+        metrics_text += f"- **Avg Distortion Score:** {agg['avg_distortion_score']:.4f} _(closer to 1.0 is better)_\n"
 
     return metrics_text
 
@@ -438,6 +518,12 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                         scale=1
                     )
 
+                    show_videos = gr.Checkbox(
+                        label="Show videos (if available)",
+                        value=False,
+                        interactive=True,
+                        scale=1
+                    )
         # Main comparison view: dropdowns above their respective images
         with gr.Row():
             with gr.Column():
@@ -447,7 +533,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                     value="Raw",
                     interactive=True
                 )
-                left_image = gr.Image(label=None, type="numpy")
+                left_image = gr.Image(label=None, type="numpy", visible=True)
+                left_video = gr.Video(label=None, visible=False, autoplay=True)
                 left_metrics = gr.Markdown("", elem_classes="metrics-text")
 
             with gr.Column():
@@ -457,7 +544,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                     value=viewer.available_models[0] if viewer.available_models else "Raw",
                     interactive=True
                 )
-                right_image = gr.Image(label=None, type="numpy")
+                right_image = gr.Image(label=None, type="numpy", visible=True)
+                right_video = gr.Video(label=None, visible=False, autoplay=True)
                 right_metrics = gr.Markdown("", elem_classes="metrics-text")
 
         # Event handlers
@@ -466,18 +554,82 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             count = viewer.get_frame_count(flight_name)
             return gr.Slider(maximum=max(0, count - 1), value=0)
 
-        def update_comparison(flight_name, frame_pos, left_mod, right_mod):
-            """Update both images and metrics when any parameter changes."""
-            left_img, right_img, info = viewer.compare_frames(flight_name, int(frame_pos), left_mod, right_mod)
+        def _get_video_path_for_model(model_name, flight_name):
+            """Return absolute path to pre-rendered video for a model+flight if it exists."""
+            out_videos = Path(viewer.output_dir) / "videos"
+            if model_name == "Raw":
+                p = out_videos / "original" / f"{flight_name}.mp4"
+                if p.exists():
+                    return str(p.absolute())
+                return None
 
-            # Load evaluation metrics for both models
+            # model_name may match a folder under output/videos (e.g., baseline, fusion)
+            candidate = out_videos / model_name / f"{flight_name}.mp4"
+            if candidate.exists():
+                return str(candidate.absolute())
+
+            return None
+
+
+        def update_comparison(flight_name, frame_pos, left_mod, right_mod, use_videos):
+            """Update images/videos and metrics when any parameter changes."""
+            # Prepare metrics
             left_eval = load_evaluation_results(viewer.output_dir, left_mod)
             right_eval = load_evaluation_results(viewer.output_dir, right_mod)
 
-            left_metrics_text = format_metrics_display(left_eval, left_mod, flight_name)
-            right_metrics_text = format_metrics_display(right_eval, right_mod, flight_name)
+            left_metrics_text = format_metrics_display(left_eval, left_mod, viewer.output_dir, flight_name)
+            right_metrics_text = format_metrics_display(right_eval, right_mod, viewer.output_dir, flight_name)
 
-            return left_img, right_img, info, left_metrics_text, right_metrics_text
+            info = f"**Flight:** {flight_name} | **Position:** {int(frame_pos) + 1}/{viewer.get_frame_count(flight_name)}"
+
+            if use_videos:
+                # Try to find videos for left and right
+                left_vid = _get_video_path_for_model(left_mod, flight_name)
+                right_vid = _get_video_path_for_model(right_mod, flight_name)
+
+                # Debug output
+                print(f"[VIDEO MODE] Left: {left_mod} -> {left_vid}")
+                print(f"[VIDEO MODE] Right: {right_mod} -> {right_vid}")
+
+                # Update info to indicate video mode
+                video_status = []
+                if left_vid:
+                    video_status.append("Left: ✓")
+                else:
+                    video_status.append("Left: ✗ (no video)")
+                if right_vid:
+                    video_status.append("Right: ✓")
+                else:
+                    video_status.append("Right: ✗ (no video)")
+
+                info = f"**Flight:** {flight_name} | **Video Mode** | {' | '.join(video_status)}"
+
+                # Hide image components and show video components with proper paths
+                return (
+                    gr.update(visible=False),  # left_image
+                    gr.update(value=left_vid, visible=True) if left_vid else gr.update(visible=True),  # left_video
+                    gr.update(visible=False),  # right_image
+                    gr.update(value=right_vid, visible=True) if right_vid else gr.update(visible=True),  # right_video
+                    info,  # info_text
+                    left_metrics_text,  # left_metrics
+                    right_metrics_text  # right_metrics
+                )
+
+            # Otherwise show images as before
+            frame_idx, raw_frame_path = viewer.get_frame_info(flight_name, int(frame_pos))
+            left_path = raw_frame_path if left_mod == "Raw" else get_stabilized_frame(viewer.output_dir, left_mod, flight_name, frame_idx)
+            right_path = raw_frame_path if right_mod == "Raw" else get_stabilized_frame(viewer.output_dir, right_mod, flight_name, frame_idx)
+
+            left_img = load_and_prepare_image(left_path)
+            right_img = load_and_prepare_image(right_path)
+
+            # Ensure image components visible and videos hidden
+            left_img_update = gr.update(value=left_img, visible=True)
+            right_img_update = gr.update(value=right_img, visible=True)
+            left_vid_update = gr.update(visible=False)
+            right_vid_update = gr.update(visible=False)
+
+            return left_img_update, left_vid_update, right_img_update, right_vid_update, info, left_metrics_text, right_metrics_text
 
         def prev_frame(frame_pos):
             """Go to previous frame."""
@@ -493,8 +645,8 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
         # Playback state tracking
         playback_control = {"should_stop": False}
 
-        def start_playback(flight_name, frame_pos, fps, loop, left_mod, right_mod):
-            """Start video playback."""
+        def start_playback(flight_name, frame_pos, fps, loop, left_mod, right_mod, use_videos):
+            """Start video playback. If use_videos is True, return the video paths and skip frame streaming."""
             playback_control["should_stop"] = False
             max_pos = viewer.get_frame_count(flight_name) - 1
             current_pos = int(frame_pos)
@@ -502,19 +654,50 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             # Load metrics once at start
             left_eval = load_evaluation_results(viewer.output_dir, left_mod)
             right_eval = load_evaluation_results(viewer.output_dir, right_mod)
-            left_metrics_text = format_metrics_display(left_eval, left_mod, flight_name)
-            right_metrics_text = format_metrics_display(right_eval, right_mod, flight_name)
+            left_metrics_text = format_metrics_display(left_eval, left_mod, viewer.output_dir, flight_name)
+            right_metrics_text = format_metrics_display(right_eval, right_mod, viewer.output_dir, flight_name)
 
+            # If using videos, return video sources and do not stream frames
+            if use_videos:
+                # Use the existing helper function for consistency
+                left_vid = _get_video_path_for_model(left_mod, flight_name)
+                right_vid = _get_video_path_for_model(right_mod, flight_name)
+
+                # Hide images, show videos if available
+                left_img_update = gr.update(visible=False)
+                right_img_update = gr.update(visible=False)
+                left_vid_update = gr.update(value=left_vid, visible=bool(left_vid))
+                right_vid_update = gr.update(value=right_vid, visible=bool(right_vid))
+
+                # Return a single update (metrics unchanged)
+                yield (
+                    left_img_update,
+                    left_vid_update,
+                    right_img_update,
+                    right_vid_update,
+                    f"**Flight:** {flight_name}",
+                    gr.update(value=int(frame_pos)),
+                    gr.update(value=left_metrics_text),
+                    gr.update(value=right_metrics_text),
+                    gr.update(interactive=False),
+                    gr.update(interactive=True),
+                )
+
+                return
+
+            # Otherwise perform frame-by-frame streaming as before
             # Enable pause button, disable play button
             yield (
                 gr.update(),
+                gr.update(visible=False),
                 gr.update(),
+                gr.update(visible=False),
                 gr.update(),
-                gr.update(),
+                gr.update(value=int(frame_pos)),
                 gr.update(),
                 gr.update(),
                 gr.update(interactive=False),
-                gr.update(interactive=True)
+                gr.update(interactive=True),
             )
 
             # Play through frames
@@ -527,13 +710,15 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                 # Yield updated frame (metrics stay the same during playback)
                 yield (
                     left_img,
+                    gr.update(visible=False),
                     right_img,
+                    gr.update(visible=False),
                     info,
-                    current_pos,
+                    int(current_pos),
                     left_metrics_text,
                     right_metrics_text,
                     gr.update(interactive=False),
-                    gr.update(interactive=True)
+                    gr.update(interactive=True),
                 )
 
                 # Sleep based on FPS
@@ -553,13 +738,15 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             # Playback ended, re-enable play button, disable pause button
             yield (
                 gr.update(),
+                gr.update(visible=False),
                 gr.update(),
+                gr.update(visible=False),
                 gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(interactive=True),
-                gr.update(interactive=False)
+                gr.update(interactive=False),
             )
 
         def stop_playback():
@@ -574,12 +761,12 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             outputs=[frame_slider]
         )
 
-        # Update comparison when any control changes
-        for component in [flight_dropdown, frame_slider, left_model, right_model]:
+        # Update comparison when any control changes (include show_videos)
+        for component in [flight_dropdown, frame_slider, left_model, right_model, show_videos]:
             component.change(
                 fn=update_comparison,
-                inputs=[flight_dropdown, frame_slider, left_model, right_model],
-                outputs=[left_image, right_image, info_text, left_metrics, right_metrics]
+                inputs=[flight_dropdown, frame_slider, left_model, right_model, show_videos],
+                outputs=[left_image, left_video, right_image, right_video, info_text, left_metrics, right_metrics]
             )
 
         # Navigation buttons
@@ -604,17 +791,20 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
                 fps_number,
                 loop_checkbox,
                 left_model,
-                right_model
+                right_model,
+                show_videos,
             ],
             outputs=[
                 left_image,
+                left_video,
                 right_image,
+                right_video,
                 info_text,
                 frame_slider,
                 left_metrics,
                 right_metrics,
                 play_btn,
-                pause_btn
+                pause_btn,
             ]
         )
 
@@ -625,11 +815,46 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
             outputs=[play_btn, pause_btn]
         )
 
-        # Load initial comparison
+        # Load initial comparison (default to frame mode, not video mode)
+        def initial_load():
+            """Load initial state - always start with frame view."""
+            flight = viewer.get_flight_names()[0] if viewer.get_flight_names() else None
+            if not flight:
+                return None, gr.update(visible=False), None, gr.update(visible=False), "No flights available", "", ""
+
+            left_mod = "Raw"
+            right_mod = viewer.available_models[0] if viewer.available_models else "Raw"
+
+            # Load initial frame
+            frame_idx, raw_frame_path = viewer.get_frame_info(flight, 0)
+            left_path = raw_frame_path
+            right_path = raw_frame_path if right_mod == "Raw" else get_stabilized_frame(viewer.output_dir, right_mod, flight, frame_idx)
+
+            left_img = load_and_prepare_image(left_path)
+            right_img = load_and_prepare_image(right_path)
+
+            # Load metrics
+            left_eval = load_evaluation_results(viewer.output_dir, left_mod)
+            right_eval = load_evaluation_results(viewer.output_dir, right_mod)
+            left_metrics_text = format_metrics_display(left_eval, left_mod, viewer.output_dir, flight)
+            right_metrics_text = format_metrics_display(right_eval, right_mod, viewer.output_dir, flight)
+
+            info = f"**Flight:** {flight} | **Frame:** {frame_idx} | **Position:** 1/{viewer.get_frame_count(flight)}"
+
+            return (
+                gr.update(value=left_img, visible=True),
+                gr.update(visible=False),
+                gr.update(value=right_img, visible=True),
+                gr.update(visible=False),
+                info,
+                left_metrics_text,
+                right_metrics_text
+            )
+
         app.load(
-            fn=update_comparison,
-            inputs=[flight_dropdown, frame_slider, left_model, right_model],
-            outputs=[left_image, right_image, info_text, left_metrics, right_metrics]
+            fn=initial_load,
+            inputs=[],
+            outputs=[left_image, left_video, right_image, right_video, info_text, left_metrics, right_metrics]
         )
 
         gr.Markdown("""
@@ -637,6 +862,9 @@ def create_app(data_dir='data/images', output_dir='output', split_path='data/dat
         ### Tips
         - **Single Frame**: Use the slider or ◀ ▶ buttons to browse frames
         - **Video Playback**: Click "▶ Play" to play through frames as a video
+        - **Rendered Videos**: Check "Show videos (if available)" to display pre-rendered videos from `output/videos/`
+          - Videos must be in: `output/videos/original/` for Raw, `output/videos/{model}/` for models
+          - Video format: `{FlightName}.mp4`
         - **Playback Speed**: Adjust FPS (1-30) to control playback speed
         - **Loop**: Enable to continuously loop through frames
         - **Model Comparison**: Select different models in the dropdowns above each image
