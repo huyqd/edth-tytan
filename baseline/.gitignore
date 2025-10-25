@@ -1,0 +1,10 @@
+# Ignore cache directories and files
+.cache/
+cache/
+**/cache/
+__pycache__/
+*.cache
+
+# Ignore image files and common image directories
+data/
+res/
