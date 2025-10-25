@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import time
+from typing import Dict, List, Optional
+from .base import StabilizationModel
 
 def get_matches_kp(img1_gray, img2_gray, max_features=2000):
     """
@@ -131,3 +133,58 @@ def stabilize_frames(frames, ref_idx=None):
         "inliers": inliers_list,
         "ref_idx": ref_idx
     }
+
+
+class BaselineModel(StabilizationModel):
+    """
+    Baseline optical flow stabilization model.
+
+    Uses Lucas-Kanade optical flow + RANSAC to estimate scale and translation
+    between frames. Does not use sensor data.
+    """
+
+    def __init__(self, max_features: int = 2000):
+        """
+        Initialize baseline model.
+
+        Args:
+            max_features: Maximum number of features to track (default: 2000)
+        """
+        self.max_features = max_features
+
+    def stabilize_frames(
+        self,
+        frames: List[np.ndarray],
+        sensor_data: Optional[List[Dict]] = None,
+        ref_idx: Optional[int] = None
+    ) -> Dict:
+        """
+        Stabilize frames using optical flow.
+
+        Args:
+            frames: List of BGR images
+            sensor_data: Optional sensor data (not used by baseline)
+            ref_idx: Optional reference frame index
+
+        Returns:
+            dict with warped frames, transformations, and metadata
+        """
+        # Call the existing stabilize_frames function
+        result = stabilize_frames(frames, ref_idx=ref_idx)
+
+        # Add rotation angles (baseline doesn't estimate rotation, so all zeros)
+        result["rotations"] = [0.0] * len(frames)
+
+        # Add transformation matrices
+        transforms = []
+        h, w = frames[result["ref_idx"]].shape[:2] if frames else (0, 0)
+        for scale, (tx, ty) in zip(result["scales"], result["translations"]):
+            transform_matrix = np.array([
+                [scale, 0, tx],
+                [0, scale, ty],
+                [0, 0, 1]
+            ])
+            transforms.append(transform_matrix)
+        result["transforms"] = transforms
+
+        return result

@@ -3,10 +3,13 @@ import numpy as np
 import os
 import json
 import argparse
+import pandas as pd
 from pathlib import Path
 from collections import defaultdict
+from typing import Optional, Dict, List
 from utils.datasets import create_dataloader
-from model.baseline import stabilize_frames
+from model.baseline import stabilize_frames  # Keep for backward compatibility
+from model import BaselineModel, FusionModel, StabilizationModel
 
 
 def load_data_split(split_path):
@@ -14,6 +17,81 @@ def load_data_split(split_path):
     with open(split_path, 'r') as f:
         split_config = json.load(f)
     return split_config
+
+
+def load_sensor_data_cache(labels_root: str, split_set: Optional[str] = None, split_config: Optional[Dict] = None) -> Dict[str, pd.DataFrame]:
+    """
+    Load and cache sensor data CSVs.
+
+    Args:
+        labels_root: Path to labels directory
+        split_set: Optional split set name ('train', 'val', 'test')
+        split_config: Optional split configuration dict
+
+    Returns:
+        dict mapping flight_name to DataFrame
+    """
+    sensor_cache = {}
+    labels_path = Path(labels_root)
+
+    # Check if split-specific CSV files exist
+    if split_set and split_config and 'metadata' in split_config:
+        labels_split_dir = split_config['metadata'].get('labels_split_dir')
+        if labels_split_dir:
+            split_labels_path = Path(labels_split_dir) / split_set
+            if split_labels_path.exists():
+                print(f"Loading split sensor data from: {split_labels_path}")
+                labels_path = split_labels_path
+
+    # Load all CSV files in the labels directory
+    for csv_file in labels_path.glob("*.csv"):
+        flight_name = csv_file.stem
+        try:
+            df = pd.read_csv(csv_file)
+            # Convert frame_id to int for fast lookup
+            df['frame_id_int'] = df['frame_id'].apply(lambda x: int(x) if isinstance(x, (int, str)) else int(x))
+            df = df.set_index('frame_id_int')
+            sensor_cache[flight_name] = df
+        except Exception as e:
+            print(f"Warning: Failed to load sensor data for {flight_name}: {e}")
+
+    return sensor_cache
+
+
+def get_sensor_data_for_frames(frame_paths: List[str], sensor_cache: Dict[str, pd.DataFrame]) -> List[Optional[Dict]]:
+    """
+    Get sensor data for a list of frame paths.
+
+    Args:
+        frame_paths: List of frame file paths
+        sensor_cache: Dict mapping flight_name to DataFrame
+
+    Returns:
+        List of sensor data dicts (or None if not available)
+    """
+    sensor_data_list = []
+
+    for frame_path in frame_paths:
+        # Extract flight name and frame index
+        path_parts = frame_path.split(os.sep)
+        flight_name = path_parts[-2]
+        frame_name = os.path.splitext(os.path.basename(frame_path))[0]
+
+        try:
+            frame_idx = int(frame_name)
+        except ValueError:
+            sensor_data_list.append(None)
+            continue
+
+        # Look up sensor data
+        if flight_name in sensor_cache and frame_idx in sensor_cache[flight_name].index:
+            row = sensor_cache[flight_name].loc[frame_idx]
+            sensor_dict = row.to_dict()
+            sensor_data_list.append(sensor_dict)
+        else:
+            sensor_data_list.append(None)
+
+    return sensor_data_list
 
 
 def get_split_frame_indices(split_config, split_set='test'):
@@ -78,8 +156,8 @@ Examples:
   # Process only test set
   python src/inference.py --split data/data_split.json --split-set test
 
-  # Process validation set
-  python src/inference.py --split data/data_split.json --split-set val
+  # Process validation set with custom model
+  python src/inference.py --split data/data_split.json --split-set val --model baseline --use-sensor-data
         """
     )
 
@@ -101,11 +179,29 @@ Examples:
     parser.add_argument(
         '--output-name',
         type=str,
+        default=None,
+        help='Output folder name under output/ (default: same as model name)'
+    )
+
+    parser.add_argument(
+        '--model',
+        type=str,
         default='baseline',
-        help='Output folder name under output/ (default: baseline)'
+        choices=['baseline', 'fusion'],
+        help='Model to use for stabilization (default: baseline)'
+    )
+
+    parser.add_argument(
+        '--use-sensor-data',
+        action='store_true',
+        help='Load and pass sensor data to model'
     )
 
     args = parser.parse_args()
+
+    # Set default output name to model name if not specified
+    if args.output_name is None:
+        args.output_name = args.model
 
     # repo root (one level up from model/)
     repo_root = os.path.dirname(os.path.dirname(__file__))
@@ -113,8 +209,22 @@ Examples:
     images_root = os.path.join(mock_root, "images")
     labels_root = os.path.join(mock_root, "labels")
 
+    # Initialize model
+    print(f"Initializing model: {args.model}")
+    if args.model == 'baseline':
+        model = BaselineModel()
+    elif args.model == 'fusion':
+        model = FusionModel()
+        # Fusion model requires sensor data, enable it automatically
+        if not args.use_sensor_data:
+            print("Note: Fusion model requires sensor data. Enabling --use-sensor-data automatically.")
+            args.use_sensor_data = True
+    else:
+        raise ValueError(f"Unknown model: {args.model}")
+
     # Load data split if provided
     split_indices = None
+    split_config = None
     if args.split and args.split.strip():  # Check if split is not empty string
         split_path = os.path.join(repo_root, args.split)
         if os.path.exists(split_path):
@@ -134,6 +244,18 @@ Examples:
             print("-" * 80)
     else:
         print("No split specified, processing all data...")
+        print("-" * 80)
+
+    # Load sensor data if requested
+    sensor_cache = {}
+    if args.use_sensor_data:
+        print("Loading sensor data...")
+        sensor_cache = load_sensor_data_cache(
+            labels_root,
+            split_set=args.split_set if split_config else None,
+            split_config=split_config
+        )
+        print(f"Loaded sensor data for {len(sensor_cache)} flights")
         print("-" * 80)
 
     # dataloader settings: window of 2 frames
@@ -217,12 +339,17 @@ Examples:
 
         frames = loaded
 
-        # call existing stabilize function from this module
-        res_dict = stabilize_frames(frames, ref_idx=stride // 2)
+        # Get sensor data for these frames if available
+        sensor_data = None
+        if sensor_cache:
+            sensor_data = get_sensor_data_for_frames(window_frames, sensor_cache)
+
+        # Call model to stabilize frames
+        res_dict = model.stabilize_frames(frames, sensor_data=sensor_data, ref_idx=stride // 2)
         warped = res_dict["warped"]
         orig = res_dict["orig"]
         if not warped:
-            print(f"Stabilization failed for set {frames}")
+            print(f"Stabilization failed for set {window_frames}")
             continue
 
         # Save stabilized frames and transformation data
