@@ -108,6 +108,9 @@ def format_metrics_display(eval_results, model_name, current_flight=None):
         # Format original-only metrics
         avg_diff = agg.get('avg_interframe_diff', 0)
         avg_flow = agg.get('avg_flow_magnitude', 0)
+        avg_psnr = agg.get('avg_psnr', 0)
+        avg_sharpness = agg.get('avg_sharpness', 0)
+        avg_cropping = agg.get('avg_cropping_ratio', 0)
         total_frames = agg.get('total_frames', 0)
         num_flights = agg.get('num_flights', len(per_flight))
 
@@ -122,17 +125,32 @@ def format_metrics_display(eval_results, model_name, current_flight=None):
                 metrics_text += f"""
 **Current Flight ({current_flight}):**
 - **Frames:** {flight_metrics.get('num_frames_original', 0)}
-- **Inter-frame Diff:** {flight_metrics.get('original_avg_interframe_diff', 0):.2f}
-- **Flow Magnitude:** {flight_metrics.get('original_avg_flow_magnitude', 0):.2f}
-
+- **Inter-frame Diff:** {flight_metrics.get('original_avg_interframe_diff', 0):.2f} ± {flight_metrics.get('original_std_interframe_diff', 0):.2f}
+- **Flow Magnitude:** {flight_metrics.get('original_avg_flow_magnitude', 0):.2f} ± {flight_metrics.get('original_std_flow_magnitude', 0):.2f}
 """
+                # Add optional metrics if available
+                if flight_metrics.get('original_avg_psnr', 0) > 0:
+                    metrics_text += f"- **PSNR:** {flight_metrics.get('original_avg_psnr', 0):.2f} dB\n"
+                if flight_metrics.get('original_avg_sharpness', 0) > 0:
+                    metrics_text += f"- **Sharpness:** {flight_metrics.get('original_avg_sharpness', 0):.2f}\n"
+                if flight_metrics.get('original_avg_cropping_ratio', 0) > 0:
+                    metrics_text += f"- **Cropping Ratio:** {flight_metrics.get('original_avg_cropping_ratio', 0):.1%}\n"
+                metrics_text += "\n"
 
         # Add aggregate metrics
         metrics_text += f"""**Aggregate ({num_flights} flights, {total_frames} frames):**
 - **Avg Inter-frame Difference:** {avg_diff:.2f}
 - **Avg Optical Flow Magnitude:** {avg_flow:.2f}
+"""
+        # Add optional aggregate metrics if available
+        if avg_psnr > 0:
+            metrics_text += f"- **Avg PSNR:** {avg_psnr:.2f} dB\n"
+        if avg_sharpness > 0:
+            metrics_text += f"- **Avg Sharpness:** {avg_sharpness:.2f}\n"
+        if avg_cropping > 0:
+            metrics_text += f"- **Avg Cropping Ratio:** {avg_cropping:.1%}\n"
 
-_Baseline metrics for unstabilized video_"""
+        metrics_text += "\n_Baseline metrics for unstabilized video_"
 
         return metrics_text
 
@@ -157,15 +175,30 @@ _Baseline metrics for unstabilized video_"""
 - **Frames:** {flight_metrics.get('num_frames_stabilized', 0)}
 - **Diff Improvement:** {flight_metrics.get('improvement_interframe_diff', 0):.1f}%
 - **Flow Improvement:** {flight_metrics.get('improvement_flow_magnitude', 0):.1f}%
-- **PSNR:** {flight_metrics.get('stabilized_avg_psnr', 0):.2f} dB
-- **Crop Ratio:** {flight_metrics.get('stabilized_avg_cropping_ratio', 0):.1%}
-
 """
+            # Original metrics
+            if flight_metrics.get('original_avg_interframe_diff', 0) > 0:
+                metrics_text += f"- **Original Diff:** {flight_metrics.get('original_avg_interframe_diff', 0):.2f} → **Stabilized:** {flight_metrics.get('stabilized_avg_interframe_diff', 0):.2f}\n"
+            if flight_metrics.get('original_avg_flow_magnitude', 0) > 0:
+                metrics_text += f"- **Original Flow:** {flight_metrics.get('original_avg_flow_magnitude', 0):.2f} → **Stabilized:** {flight_metrics.get('stabilized_avg_flow_magnitude', 0):.2f}\n"
+            
+            # Quality metrics
+            if flight_metrics.get('stabilized_avg_psnr', 0) > 0:
+                metrics_text += f"- **PSNR:** {flight_metrics.get('stabilized_avg_psnr', 0):.2f} dB\n"
+            if flight_metrics.get('stabilized_avg_sharpness', 0) > 0:
+                metrics_text += f"- **Sharpness:** {flight_metrics.get('stabilized_avg_sharpness', 0):.2f}\n"
+            if flight_metrics.get('stabilized_avg_cropping_ratio', 0) > 0:
+                metrics_text += f"- **Crop Ratio:** {flight_metrics.get('stabilized_avg_cropping_ratio', 0):.1%}\n"
+            metrics_text += "\n"
 
     # Add aggregate metrics
     metrics_text += f"""**Aggregate ({num_flights} flights):**
-- **Inter-frame Diff Improvement:** {diff_improv:.1f}%
-- **Flow Magnitude Improvement:** {flow_improv:.1f}%
+
+**Improvements:**
+- **Inter-frame Diff:** {diff_improv:.1f}%
+- **Flow Magnitude:** {flow_improv:.1f}%
+
+**Quality Metrics:**
 - **Avg PSNR:** {psnr:.2f} dB
 - **Avg Sharpness:** {sharpness:.2f}
 - **Avg Cropping Ratio:** {crop_ratio:.1%}
@@ -173,8 +206,11 @@ _Baseline metrics for unstabilized video_"""
 
     # Add advanced metrics if available
     if 'avg_stability_score_fft' in agg:
+        metrics_text += f"\n**Advanced Metrics:**\n"
         metrics_text += f"- **Stability Score (FFT):** {agg['avg_stability_score_fft']:.4f}\n"
     if 'avg_distortion_score' in agg:
+        if 'avg_stability_score_fft' not in agg:
+            metrics_text += f"\n**Advanced Metrics:**\n"
         metrics_text += f"- **Avg Distortion Score:** {agg['avg_distortion_score']:.4f}\n"
 
     return metrics_text
