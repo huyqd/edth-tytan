@@ -11,4 +11,5 @@ wheels/
 data
 res
 .DS_Store
-*.jpb
+*.jpg
+output/

@@ -4,9 +4,10 @@ import os
 from utils.datasets import create_dataloader
 from model.baseline import stabilize_frames
 
+
 def main():
     # repo root (one level up from model/)
-    repo_root = os.path.dirname(__file__)
+    repo_root = os.path.dirname(os.path.dirname(__file__))
     mock_root = os.path.join(repo_root, "data")
     images_root = os.path.join(mock_root, "images")
     labels_root = os.path.join(mock_root, "labels")
@@ -17,7 +18,7 @@ def main():
         "skip_rate": [0, 1],
         "val_skip_rate": [0, 1],
         "debug_data": False,
-        "frame_wise": 0
+        "frame_wise": 0,
     }
 
     # create dataloader + dataset (batch_size 1, we will iterate pairs manually)
@@ -35,7 +36,7 @@ def main():
         debug_dir=None,
     )
 
-    out_root = os.path.join(repo_root, "data_res")
+    out_root = os.path.join(repo_root, "output", "baseline")
     os.makedirs(out_root, exist_ok=True)
 
     n = len(dataset.img_files)
@@ -45,11 +46,13 @@ def main():
     cached_stabilized_frames = []
 
     for i in range(window, n, stride):
-        mid_idx = i - (window // 2 + 1) if window > 2 else i - window//2
+        mid_idx = i - (window // 2 + 1) if window > 2 else i - window // 2
         ref_frame_path = dataset.img_files[mid_idx]
         if use_stabilized_frames and cached_stabilized_frames:
-            frames_stabilized = cached_stabilized_frames[(window - stride):]
-            frames_unstabilized = [dataset.img_files[j] for j in range(i - window + (window - stride), i)]
+            frames_stabilized = cached_stabilized_frames[(window - stride) :]
+            frames_unstabilized = [
+                dataset.img_files[j] for j in range(i - window + (window - stride), i)
+            ]
             frames = frames_stabilized + frames_unstabilized
         else:
             frames = [dataset.img_files[j] for j in range(i - window, i)]
@@ -73,14 +76,19 @@ def main():
         frames = loaded
 
         # call existing stabilize function from this module
-        res_dict = stabilize_frames(frames, ref_idx=stride//2)
+        res_dict = stabilize_frames(frames, ref_idx=stride // 2)
         warped = res_dict["warped"]
         orig = res_dict["orig"]
         if not warped:
             print(f"Stabilization failed for set {frames}")
             continue
 
-        fnames = [os.path.join(out_root, f"{os.path.basename(dataset.img_files[j]).split(os.sep)[0]}") for j in range(i - stride, i)]
+        fnames = [
+            os.path.join(
+                out_root, f"{os.path.basename(dataset.img_files[j]).split(os.sep)[0]}"
+            )
+            for j in range(i - stride, i)
+        ]
         for i, fname in enumerate(fnames):
             cv2.imwrite(fname, loaded[i])
         cached_stabilized_frames = warped
