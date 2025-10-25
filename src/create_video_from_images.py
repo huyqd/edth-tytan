@@ -119,6 +119,8 @@ def main():
     parser.add_argument("--split", choices=["train", "val", "test"], help="If provided, filter frames using data/data_split.json for the given split")
     parser.add_argument("--data-split", default="data/data_split.json", help="Path to data split JSON (default: data/data_split.json)")
     parser.add_argument("--ext", default="jpg", help="Image file extension to look for (default: jpg)")
+    # Make 'all' the default behavior; pass --no-all to run single-flight mode (not implemented, keep bool)
+    parser.add_argument("--all", action="store_true", default=True, help="Render videos for all flights found in the source directory (default: True)")
 
     args = parser.parse_args()
 
@@ -129,8 +131,9 @@ def main():
     if args.model:
         # Prefer --model when provided
         model = args.model
-        if not flight_name:
-            parser.error("when using --model you must provide the positional flight name (e.g. Flight1)")
+        # flight_name is optional now; if not provided we default to processing all flights
+        if not flight_name and not args.all:
+            parser.error("when using --model in single-flight mode you must provide the positional flight name (e.g. Flight1)")
 
         if model.lower() == "original":
             # Read from data/images/<flight>
@@ -181,8 +184,8 @@ def main():
     output_dir = Path(args.output_dir) / "videos" / src_label
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # handle split filtering
-    frame_filter = None
+    # prepare split mapping (if requested) — load once and reuse for all flights
+    splits = {}
     if args.split:
         split_path = Path(args.data_split)
         if not split_path.exists():
@@ -192,20 +195,52 @@ def main():
                 with open(split_path, "r") as f:
                     ds = json.load(f)
                 splits = ds.get("splits", {})
-                split_map = splits.get(args.split, {})
-                # Expect split_map to be mapping from flight name to list of frame indices
-                if flight_name not in split_map:
-                    print(f"Warning: flight {flight_name} not found in split '{args.split}'; no filtering applied")
-                else:
-                    indices = set(split_map[flight_name])
-                    frame_filter = indices
-                    print(f"Filtering {len(indices)} frames for flight {flight_name} from split '{args.split}'")
             except Exception as e:
                 print(f"Failed to read/parse split file: {e}; skipping split filtering")
 
-    # prepare output path
+    # If --all specified, iterate over all flight subdirectories under the source root
+    if args.all:
+        # Determine flights root dir depending on provided inputs
+        if args.model:
+            if args.model.lower() == "original":
+                flights_root = Path("data") / "images"
+            else:
+                flights_root = Path(args.output_dir) / args.model
+        elif args.input_dir:
+            flights_root = Path(args.input_dir)
+        else:
+            flights_root = Path(args.output_dir) / "fusion"
+
+        if not flights_root.exists():
+            print(f"Flights root does not exist: {flights_root}")
+            return
+
+        for flight_dir in sorted([p for p in flights_root.iterdir() if p.is_dir()]):
+            flight = flight_dir.name
+            safe_flight = flight.replace("/", "_")
+            # compute frame_filter for this flight if splits provided
+            frame_filter = None
+            if args.split:
+                split_map = splits.get(args.split, {})
+                if flight in split_map:
+                    indices = set(split_map[flight])
+                    frame_filter = indices
+                    print(f"Filtering {len(indices)} frames for flight {flight} from split '{args.split}'")
+                else:
+                    print(f"Warning: flight {flight} not found in split '{args.split}'; no filtering applied for this flight")
+
+            # build output path and call writer
+            output_path = Path(args.output_dir) / "videos" / src_label / f"{safe_flight}.{args.format}"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if args.format == "mp4":
+                _create_or_filter_and_write(str(flight_dir), str(output_path), args.fps, args.ext, frame_filter, create_video_from_images)
+            else:
+                _create_or_filter_and_write(str(flight_dir), str(output_path), args.fps, args.ext, frame_filter, lambda d, o, f: create_gif_from_images(d, o, args.fps, args.max_frames))
+
+        return
+
+    # prepare output path for single-flight mode
     safe_flight = flight_name.replace("/", "_")
-    # choose filename base (do not append special suffixes like '_fusion')
     filename_base = f"{safe_flight}"
 
     if args.format == "mp4":

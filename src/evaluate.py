@@ -4,16 +4,35 @@ Evaluation pipeline for video stabilization algorithms.
 This script compares original raw images with stabilized images and computes
 quantitative metrics to assess stabilization quality.
 
-Metrics computed:
-- Inter-frame Stability Score (lower is better) - measures smoothness
-- Average Inter-frame Difference (lower is better) - pixel-level stability
-- PSNR between consecutive frames (higher is better)
-- Distortion Score - amount of content loss due to warping
+Metrics computed for ALL frames (original and stabilized):
+- Inter-frame Difference (lower is better) - pixel-level stability
+- Optical Flow Magnitude (lower is better) - measures motion smoothness
+- PSNR between consecutive frames (higher is better) - frame similarity
+- Sharpness (higher is better) - image clarity via Laplacian variance
 - Cropping Ratio - percentage of valid pixels after stabilization
+- Distortion Score (optional) - amount of content loss due to warping
+
+Performance:
+- Uses parallel processing to compute metrics faster (default: auto-detect CPU count)
+- For sequences with >50 frame pairs, metrics are computed in parallel batches
+- Control parallelization with --workers flag (e.g., --workers 4)
+
+When evaluating a model:
+- Computes the same metrics for both original and stabilized frames
+- Calculates improvement percentages over original
+- Uses pre-computed original metrics if available (from --original-metrics file)
+- This avoids redundant computation when evaluating multiple models
 
 Usage:
+    # First, compute original video metrics (recommended, done once)
+    python src/evaluate.py --model original --split-set test
+    
+    # Then evaluate models (will use cached original metrics)
     python src/evaluate.py --model baseline
     python src/evaluate.py --model mymodel --data-dir data/images --output-dir output
+    
+    # Control parallel workers
+    python src/evaluate.py --model baseline --workers 8
 """
 
 import argparse
@@ -24,6 +43,8 @@ from pathlib import Path
 from tqdm import tqdm
 import json
 import warnings
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 
 def compute_interframe_diff(frame1, frame2):
@@ -103,6 +124,46 @@ def compute_largest_inscribed_rect(frame, threshold=5):
     total_area = frame.shape[0] * frame.shape[1]
 
     return valid_area / total_area
+
+
+def _compute_frame_pair_metrics(frame_pair):
+    """
+    Compute all metrics for a single frame pair.
+    This function is designed to be called in parallel.
+    
+    Args:
+        frame_pair: tuple of (frame1, frame2)
+    
+    Returns:
+        dict with all computed metrics for this frame pair
+    """
+    frame1, frame2 = frame_pair
+    
+    # Inter-frame difference
+    diff = compute_interframe_diff(frame1, frame2)
+    
+    # PSNR
+    psnr = compute_psnr(frame1, frame2)
+    if np.isinf(psnr):
+        psnr = None
+    
+    # Optical flow
+    flow_mag, flow_std = compute_optical_flow_smoothness(frame1, frame2)
+    
+    # Sharpness
+    sharpness = compute_sharpness(frame1)
+    
+    # Cropping ratio
+    crop_ratio = compute_largest_inscribed_rect(frame1)
+    
+    return {
+        'diff': diff,
+        'psnr': psnr,
+        'flow_mag': flow_mag,
+        'flow_std': flow_std,
+        'sharpness': sharpness,
+        'crop_ratio': crop_ratio
+    }
 
 
 def compute_cropping_ratio(frame):
@@ -377,13 +438,77 @@ def save_original_metrics(metrics_list, output_path, split_info=None):
         json.dump(results, f, indent=2)
 
 
-def evaluate_original_only(original_frames, flight_name):
+def compute_frame_sequence_metrics(frames, prefix="", desc="Computing metrics", num_workers=None):
+    """
+    Compute metrics for a sequence of frames using parallel processing.
+
+    Args:
+        frames: List of (path, frame) tuples
+        prefix: Prefix for metric keys (e.g., "original_" or "stabilized_")
+        desc: Description for progress bar
+        num_workers: Number of parallel workers (None = use cpu_count)
+
+    Returns:
+        Dictionary of metrics with the specified prefix
+    """
+    metrics = {}
+
+    if len(frames) < 2:
+        return metrics
+
+    # Prepare frame pairs for parallel processing
+    frame_pairs = [(frames[i][1], frames[i+1][1]) for i in range(len(frames) - 1)]
+    
+    # Determine number of workers
+    if num_workers is None:
+        num_workers = min(cpu_count(), len(frame_pairs))
+    
+    # Use parallel processing for large datasets, sequential for small ones
+    if len(frame_pairs) > 50 and num_workers > 1:
+        # Parallel processing
+        with Pool(processes=num_workers) as pool:
+            results = list(tqdm(
+                pool.imap(_compute_frame_pair_metrics, frame_pairs, chunksize=10),
+                total=len(frame_pairs),
+                desc=desc,
+                leave=False
+            ))
+    else:
+        # Sequential processing for small datasets (overhead not worth it)
+        results = []
+        for pair in tqdm(frame_pairs, desc=desc, leave=False):
+            results.append(_compute_frame_pair_metrics(pair))
+    
+    # Aggregate results
+    diffs = [r['diff'] for r in results]
+    psnrs = [r['psnr'] for r in results if r['psnr'] is not None]
+    flow_mags = [r['flow_mag'] for r in results]
+    flow_stds = [r['flow_std'] for r in results]
+    sharpness_values = [r['sharpness'] for r in results]
+    cropping_ratios = [r['crop_ratio'] for r in results]
+
+    # Aggregate metrics
+    metrics.update({
+        f"{prefix}avg_interframe_diff": float(np.mean(diffs)) if diffs else 0.0,
+        f"{prefix}std_interframe_diff": float(np.std(diffs)) if diffs else 0.0,
+        f"{prefix}avg_flow_magnitude": float(np.mean(flow_mags)) if flow_mags else 0.0,
+        f"{prefix}std_flow_magnitude": float(np.std(flow_mags)) if flow_mags else 0.0,
+        f"{prefix}avg_psnr": float(np.mean(psnrs)) if psnrs else 0.0,
+        f"{prefix}avg_sharpness": float(np.mean(sharpness_values)) if sharpness_values else 0.0,
+        f"{prefix}avg_cropping_ratio": float(np.mean(cropping_ratios)) if cropping_ratios else 0.0,
+    })
+
+    return metrics
+
+
+def evaluate_original_only(original_frames, flight_name, num_workers=None):
     """
     Compute metrics for original frames only (for --model original).
 
     Args:
         original_frames: List of (path, frame) tuples for original video
         flight_name: Name of the flight being evaluated
+        num_workers: Number of parallel workers for metric computation
 
     Returns:
         Dictionary of metrics
@@ -397,35 +522,20 @@ def evaluate_original_only(original_frames, flight_name):
         print(f"Warning: Not enough frames found for {flight_name}")
         return metrics
 
-    # Compute inter-frame metrics for original video
-    orig_diffs = []
-    orig_flow_mags = []
-    orig_flow_stds = []
-
+    # Compute metrics using unified function
     print(f"    Computing metrics...")
-    for i in tqdm(range(len(original_frames) - 1), desc="    Metrics", leave=False):
-        _, frame1 = original_frames[i]
-        _, frame2 = original_frames[i + 1]
-
-        diff = compute_interframe_diff(frame1, frame2)
-        orig_diffs.append(diff)
-
-        flow_mag, flow_std = compute_optical_flow_smoothness(frame1, frame2)
-        orig_flow_mags.append(flow_mag)
-        orig_flow_stds.append(flow_std)
-
-    # Aggregate metrics
-    metrics.update({
-        "original_avg_interframe_diff": float(np.mean(orig_diffs)) if orig_diffs else 0.0,
-        "original_std_interframe_diff": float(np.std(orig_diffs)) if orig_diffs else 0.0,
-        "original_avg_flow_magnitude": float(np.mean(orig_flow_mags)) if orig_flow_mags else 0.0,
-        "original_std_flow_magnitude": float(np.std(orig_flow_mags)) if orig_flow_mags else 0.0,
-    })
+    frame_metrics = compute_frame_sequence_metrics(
+        original_frames, 
+        prefix="original_", 
+        desc="    Metrics",
+        num_workers=num_workers
+    )
+    metrics.update(frame_metrics)
 
     return metrics
 
 
-def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform_data=None, fps=30.0, precomputed_original_metrics=None):
+def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform_data=None, fps=30.0, precomputed_original_metrics=None, num_workers=None):
     """
     Evaluate a single flight sequence.
 
@@ -436,6 +546,7 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
         transform_data: Optional dict with transformation parameters
         fps: Frame rate for FFT-based stability score
         precomputed_original_metrics: Optional pre-computed metrics for original frames
+        num_workers: Number of parallel workers for metric computation
 
     Returns:
         Dictionary of metrics
@@ -452,96 +563,47 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
 
     # Use pre-computed original metrics if available
     if precomputed_original_metrics:
-        print(f"    Using cached original metrics")
-        orig_diffs_mean = precomputed_original_metrics.get('original_avg_interframe_diff', 0)
-        orig_flow_mags_mean = precomputed_original_metrics.get('original_avg_flow_magnitude', 0)
-        metrics.update({
-            "original_avg_interframe_diff": orig_diffs_mean,
-            "original_std_interframe_diff": precomputed_original_metrics.get('original_std_interframe_diff', 0),
-            "original_avg_flow_magnitude": orig_flow_mags_mean,
-            "original_std_flow_magnitude": precomputed_original_metrics.get('original_std_flow_magnitude', 0),
-        })
+        print("    Using cached original metrics")
+        # Extract the relevant metrics from precomputed data
+        for key in ['original_avg_interframe_diff', 'original_std_interframe_diff',
+                    'original_avg_flow_magnitude', 'original_std_flow_magnitude',
+                    'original_avg_psnr', 'original_avg_sharpness', 'original_avg_cropping_ratio']:
+            if key in precomputed_original_metrics:
+                metrics[key] = precomputed_original_metrics[key]
     else:
-        # Compute inter-frame metrics for original video
-        orig_diffs = []
-        orig_flow_mags = []
-        orig_flow_stds = []
+        # Compute metrics for original frames using unified function
+        print("    Computing metrics for original frames...")
+        original_metrics = compute_frame_sequence_metrics(
+            original_frames,
+            prefix="original_",
+            desc="    Original metrics",
+            num_workers=num_workers
+        )
+        metrics.update(original_metrics)
 
-        print(f"    Computing metrics for original frames...")
-        for i in tqdm(range(len(original_frames) - 1), desc="    Original metrics", leave=False):
-            _, frame1 = original_frames[i]
-            _, frame2 = original_frames[i + 1]
+    # Compute metrics for stabilized frames using unified function
+    print("    Computing metrics for stabilized frames...")
+    stabilized_metrics = compute_frame_sequence_metrics(
+        stabilized_frames,
+        prefix="stabilized_",
+        desc="    Stabilized metrics",
+        num_workers=num_workers
+    )
+    metrics.update(stabilized_metrics)
 
-            diff = compute_interframe_diff(frame1, frame2)
-            orig_diffs.append(diff)
-
-            flow_mag, flow_std = compute_optical_flow_smoothness(frame1, frame2)
-            orig_flow_mags.append(flow_mag)
-            orig_flow_stds.append(flow_std)
-
-        orig_diffs_mean = float(np.mean(orig_diffs)) if orig_diffs else 0.0
-        orig_flow_mags_mean = float(np.mean(orig_flow_mags)) if orig_flow_mags else 0.0
-
-        metrics.update({
-            "original_avg_interframe_diff": orig_diffs_mean,
-            "original_std_interframe_diff": float(np.std(orig_diffs)) if orig_diffs else 0.0,
-            "original_avg_flow_magnitude": orig_flow_mags_mean,
-            "original_std_flow_magnitude": float(np.std(orig_flow_mags)) if orig_flow_mags else 0.0,
-        })
-
-    # Compute inter-frame metrics for stabilized video
-    stab_diffs = []
-    stab_flow_mags = []
-    stab_flow_stds = []
-    stab_psnrs = []
-    stab_sharpness = []
-    stab_cropping_ratios = []
-
-    print(f"    Computing metrics for stabilized frames...")
-    for i in tqdm(range(len(stabilized_frames) - 1), desc="    Stabilized metrics", leave=False):
-        _, frame1 = stabilized_frames[i]
-        _, frame2 = stabilized_frames[i + 1]
-
-        diff = compute_interframe_diff(frame1, frame2)
-        stab_diffs.append(diff)
-
-        psnr = compute_psnr(frame1, frame2)
-        if not np.isinf(psnr):
-            stab_psnrs.append(psnr)
-
-        flow_mag, flow_std = compute_optical_flow_smoothness(frame1, frame2)
-        stab_flow_mags.append(flow_mag)
-        stab_flow_stds.append(flow_std)
-
-        sharpness = compute_sharpness(frame1)
-        stab_sharpness.append(sharpness)
-
-        # Use improved cropping ratio (largest inscribed rectangle)
-        crop_ratio = compute_largest_inscribed_rect(frame1)
-        stab_cropping_ratios.append(crop_ratio)
-
-    # Aggregate stabilized and improvement metrics
-    stab_diffs_mean = float(np.mean(stab_diffs)) if stab_diffs else 0.0
-    stab_flow_mags_mean = float(np.mean(stab_flow_mags)) if stab_flow_mags else 0.0
+    # Compute improvement metrics
+    orig_diff = metrics.get('original_avg_interframe_diff', 0)
+    stab_diff = metrics.get('stabilized_avg_interframe_diff', 0)
+    orig_flow = metrics.get('original_avg_flow_magnitude', 0)
+    stab_flow = metrics.get('stabilized_avg_flow_magnitude', 0)
 
     metrics.update({
-        # Stabilized video metrics
-        "stabilized_avg_interframe_diff": stab_diffs_mean,
-        "stabilized_std_interframe_diff": float(np.std(stab_diffs)) if stab_diffs else 0.0,
-        "stabilized_avg_flow_magnitude": stab_flow_mags_mean,
-        "stabilized_std_flow_magnitude": float(np.std(stab_flow_mags)) if stab_flow_mags else 0.0,
-        "stabilized_avg_psnr": float(np.mean(stab_psnrs)) if stab_psnrs else 0.0,
-        "stabilized_avg_sharpness": float(np.mean(stab_sharpness)) if stab_sharpness else 0.0,
-        "stabilized_avg_cropping_ratio": float(np.mean(stab_cropping_ratios)) if stab_cropping_ratios else 0.0,
-
         # Improvement metrics (lower is better for stability)
         "improvement_interframe_diff": float(
-            (orig_diffs_mean - stab_diffs_mean) / orig_diffs_mean * 100
-            if orig_diffs_mean > 0 else 0.0
+            (orig_diff - stab_diff) / orig_diff * 100 if orig_diff > 0 else 0.0
         ),
         "improvement_flow_magnitude": float(
-            (orig_flow_mags_mean - stab_flow_mags_mean) / orig_flow_mags_mean * 100
-            if orig_flow_mags_mean > 0 else 0.0
+            (orig_flow - stab_flow) / orig_flow * 100 if orig_flow > 0 else 0.0
         ),
     })
 
@@ -575,7 +637,7 @@ def evaluate_sequence(original_frames, stabilized_frames, flight_name, transform
     return metrics
 
 
-def evaluate_original(data_dir, split_info=None, split_set=None):
+def evaluate_original(data_dir, split_info=None, split_set=None, num_workers=None):
     """
     Evaluate original (unstabilized) video frames.
 
@@ -583,6 +645,7 @@ def evaluate_original(data_dir, split_info=None, split_set=None):
         data_dir: Path to original data directory (e.g., data/images)
         split_info: Optional split configuration
         split_set: Optional split set to process ('train', 'val', 'test')
+        num_workers: Number of parallel workers for metric computation
 
     Returns:
         Dictionary containing evaluation results for all flights
@@ -627,7 +690,7 @@ def evaluate_original(data_dir, split_info=None, split_set=None):
             continue
 
         # Compute metrics
-        metrics = evaluate_original_only(original_frames, flight_name)
+        metrics = evaluate_original_only(original_frames, flight_name, num_workers=num_workers)
         all_metrics.append(metrics)
 
         print(f"    ✓ {metrics['num_frames_original']} frames | "
@@ -643,17 +706,32 @@ def evaluate_original(data_dir, split_info=None, split_set=None):
 
     # Compute aggregate statistics
     if all_metrics:
-        results["aggregate_metrics"] = {
+        agg_stats = {
             "num_flights": len(all_metrics),
             "total_frames": sum(m["num_frames_original"] for m in all_metrics),
             "avg_interframe_diff": float(np.mean([m["original_avg_interframe_diff"] for m in all_metrics if m.get("original_avg_interframe_diff", 0) > 0])),
             "avg_flow_magnitude": float(np.mean([m["original_avg_flow_magnitude"] for m in all_metrics if m.get("original_avg_flow_magnitude", 0) > 0])),
         }
+        
+        # Add optional metrics if available
+        psnr_values = [m["original_avg_psnr"] for m in all_metrics if m.get("original_avg_psnr", 0) > 0]
+        if psnr_values:
+            agg_stats["avg_psnr"] = float(np.mean(psnr_values))
+            
+        sharpness_values = [m["original_avg_sharpness"] for m in all_metrics if m.get("original_avg_sharpness", 0) > 0]
+        if sharpness_values:
+            agg_stats["avg_sharpness"] = float(np.mean(sharpness_values))
+            
+        cropping_values = [m["original_avg_cropping_ratio"] for m in all_metrics if m.get("original_avg_cropping_ratio", 0) > 0]
+        if cropping_values:
+            agg_stats["avg_cropping_ratio"] = float(np.mean(cropping_values))
+        
+        results["aggregate_metrics"] = agg_stats
 
     return results
 
 
-def evaluate_model(model_name, data_dir, output_dir, original_metrics_path=None):
+def evaluate_model(model_name, data_dir, output_dir, original_metrics_path=None, num_workers=None):
     """
     Evaluate a stabilization model.
 
@@ -662,6 +740,7 @@ def evaluate_model(model_name, data_dir, output_dir, original_metrics_path=None)
         data_dir: Path to original data directory (e.g., data/images)
         output_dir: Path to output directory (e.g., output)
         original_metrics_path: Optional path to pre-computed original metrics JSON
+        num_workers: Number of parallel workers for metric computation
 
     Returns:
         Dictionary containing evaluation results for all flights
@@ -747,7 +826,7 @@ def evaluate_model(model_name, data_dir, output_dir, original_metrics_path=None)
             precomputed_metrics = original_metrics_dict[flight_name]
 
         # Evaluate this flight
-        metrics = evaluate_sequence(original_frames, stabilized_frames, flight_name, transform_data, precomputed_original_metrics=precomputed_metrics)
+        metrics = evaluate_sequence(original_frames, stabilized_frames, flight_name, transform_data, precomputed_original_metrics=precomputed_metrics, num_workers=num_workers)
         all_metrics.append(metrics)
 
         # Print concise summary for this flight
@@ -818,19 +897,31 @@ def print_summary(results):
         print(f"  Total frames: {agg['total_frames']}")
         print(f"  Avg inter-frame difference: {agg['avg_interframe_diff']:.2f}")
         print(f"  Avg optical flow magnitude: {agg['avg_flow_magnitude']:.2f}")
+        
+        # Show additional metrics if available
+        if 'avg_psnr' in agg and agg['avg_psnr'] > 0:
+            print(f"  Avg PSNR (consecutive frames): {agg['avg_psnr']:.2f} dB")
+        if 'avg_sharpness' in agg and agg['avg_sharpness'] > 0:
+            print(f"  Avg sharpness: {agg['avg_sharpness']:.2f}")
+        if 'avg_cropping_ratio' in agg:
+            print(f"  Avg cropping ratio: {agg['avg_cropping_ratio']:.2%}")
 
         print("\n" + "-" * 80)
         print("PER-FLIGHT RESULTS:")
         print("-" * 80)
-        print(f"{'Flight':<15} {'Frames':<8} {'Diff':<11} {'Flow':<11}")
+        print(f"{'Flight':<15} {'Frames':<8} {'Diff':<11} {'Flow':<11} {'PSNR':<10} {'Sharp':<11}")
         print("-" * 80)
 
         for m in all_metrics:
+            psnr_val = m.get('original_avg_psnr', 0)
+            sharp_val = m.get('original_avg_sharpness', 0)
             print(
                 f"{m['flight_name']:<15} "
                 f"{m['num_frames_original']:<8} "
                 f"{m['original_avg_interframe_diff']:>10.2f} "
-                f"{m['original_avg_flow_magnitude']:>10.2f}"
+                f"{m['original_avg_flow_magnitude']:>10.2f} "
+                f"{psnr_val:>9.2f} "
+                f"{sharp_val:>10.2f}"
             )
     else:
         # Model evaluation with comparison to original
@@ -871,11 +962,11 @@ def print_summary(results):
             print(
                 f"{m['flight_name']:<15} "
                 f"{m['num_frames_stabilized']:<8} "
-                f"{m['original_avg_interframe_diff']:>10.2f} "
-                f"{m['stabilized_avg_interframe_diff']:>10.2f} "
-                f"{m['improvement_interframe_diff']:>8.1f}% "
-                f"{m['stabilized_avg_psnr']:>9.2f} "
-                f"{m['stabilized_avg_cropping_ratio']:>7.1%}"
+                f"{m.get('original_avg_interframe_diff', 0):>10.2f} "
+                f"{m.get('stabilized_avg_interframe_diff', 0):>10.2f} "
+                f"{m.get('improvement_interframe_diff', 0):>8.1f}% "
+                f"{m.get('stabilized_avg_psnr', 0):>9.2f} "
+                f"{m.get('stabilized_avg_cropping_ratio', 0):>7.1%}"
             )
 
 
@@ -945,6 +1036,13 @@ Examples:
         help="Path to pre-computed original metrics JSON (default: output/original_metrics.json)"
     )
 
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel workers for metric computation (default: auto-detect CPU count)"
+    )
+
     args = parser.parse_args()
 
     # Get repository root
@@ -972,7 +1070,7 @@ Examples:
     # Check if evaluating original or a model
     if args.model == "original":
         # Compute original video metrics
-        results = evaluate_original(str(data_dir), split_info, args.split_set if split_info else None)
+        results = evaluate_original(str(data_dir), split_info, args.split_set if split_info else None, num_workers=args.workers)
 
         # Add split info to results if available
         if split_info:
@@ -980,7 +1078,7 @@ Examples:
     else:
         # Evaluate stabilization model
         original_metrics_path = repo_root / args.original_metrics
-        results = evaluate_model(args.model, str(data_dir), str(output_dir), original_metrics_path)
+        results = evaluate_model(args.model, str(data_dir), str(output_dir), original_metrics_path, num_workers=args.workers)
 
         # Add split info to results if available
         if split_info:
