@@ -17,6 +17,39 @@ We apply a **bandpass filter (0.3-10 Hz)** to the pitch signal to remove only hi
 
 ## Pipeline
 
+### Required Input Data
+
+**Before running the pipeline, you must provide the following data:**
+
+**1. Video Frames** (JPG images)
+```
+data/images/Flight1/00000000.jpg
+data/images/Flight1/00000001.jpg
+data/images/Flight1/00000002.jpg
+...
+```
+- Format: Sequential JPG images with 8-digit zero-padded filenames
+- Resolution: 1350×1080 pixels (or similar)
+- Flight folders: `Flight1/`, `Flight2/`, `Flight3/`, etc.
+
+**2. Frame-Synchronized IMU Data** (CSV with quaternions)
+```
+data/labels/Flight1.csv
+```
+- **Required columns**: `qw, qx, qy, qz` (orientation quaternions in Hamilton convention)
+- Optional columns: `ax_mDs2, ay_mDs2, az_mDs2` (accelerations), `wx_radDs, wy_radDs, wz_radDs` (angular rates)
+- **One row per video frame** (synchronized by frame index)
+
+**3. Raw Flight Logs** (CSV with high-rate IMU data - for preprocessing only)
+```
+data/raw/logs/Flight1.csv
+```
+- **Required columns**: `timestamp, qw, qx, qy, qz`
+- Higher sampling rate than video frames (~300 Hz)
+- Used only for preprocessing steps (converts to filtered Euler angles)
+
+---
+
 ### 1. Data Preprocessing
 
 **Step 1a: Extract Euler angles and apply bandpass filtering**
@@ -148,29 +181,6 @@ The stabilization pipeline:
 ```
 
 ## Quick Start
-
-### Required Data
-
-Before running the pipeline, you need to provide:
-
-**1. Video frames** (JPG images)
-```
-data/images/Flight1/00000000.jpg
-data/images/Flight1/00000001.jpg
-...
-```
-
-**2. IMU sensor data** (CSV with quaternions)
-```
-data/labels/Flight1.csv
-```
-Columns required: `qw, qx, qy, qz` (orientation quaternions)
-
-**3. Raw flight logs** (CSV with high-rate IMU data)
-```
-data/raw/logs/Flight1.csv
-```
-Columns required: `timestamp, qw, qx, qy, qz` (for preprocessing)
 
 ### Running the Pipeline
 
