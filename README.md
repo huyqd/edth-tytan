@@ -1,10 +1,12 @@
 # Real-Time UAV Video Stabilization
 
-**Hackathon Challenge Solution: Online Video Stabilization for UAV Footage**
+**Hackathon Challenge: Online Video Stabilization for UAV Footage**
+
+> **🚀 Quick Start:** See [SUBMISSION.md](SUBMISSION.md) for step-by-step instructions to run the pipeline.
 
 ## Overview
 
-This project implements a real-time video stabilization system for UAV (drone) footage using IMU sensor fusion. The solution combines roll correction, high-frequency pitch filtering, and intelligent freeze frame detection to produce smooth, stable video while preserving intentional camera movements.
+This repository contains our solution for real-time UAV video stabilization using **IMU sensor fusion**. The approach combines roll correction, high-frequency pitch filtering, and intelligent freeze frame detection to produce smooth, stable video while preserving intentional camera movements.
 
 ## Problem Statement
 
@@ -12,218 +14,217 @@ UAV video footage suffers from:
 - **Horizon tilt** due to aircraft roll during turns
 - **High-frequency vibrations** from motors and turbulence
 - **Frozen/duplicate frames** in the video stream
-- **Real-time processing constraints** (must work without future frames)
+- **Real-time processing constraints** (no access to future frames)
 
 ## Our Solution
 
-### Key Components
+### Three-Part Approach
 
 1. **Roll Correction**: Fully corrects horizon tilt using IMU quaternion data
 2. **Bandpass Pitch Filtering**: Removes high-frequency vibrations (0.3-10 Hz) while preserving smooth flight path
 3. **Freeze Frame Detection**: Intelligently handles duplicate frames to avoid processing artifacts
 
+### Key Innovation: Frequency-Domain Stabilization
+
+We apply a **Butterworth bandpass filter (0.3-10 Hz)** to the pitch signal:
+- **Below 0.3 Hz**: Remove slow drift and sensor bias
+- **0.3-10 Hz**: **Preserve intentional flight movements** (terrain following, maneuvers)
+- **Above 10 Hz**: **Remove motor vibrations and turbulence**
+
+This allows the drone to naturally follow the terrain while eliminating high-frequency jitter.
+
 ### Why This Works
 
 - **Sensor Fusion**: Combines visual (frames) + inertial (IMU) data for robust stabilization
-- **Frequency-Domain Approach**: Bandpass filtering removes vibrations while keeping intentional movements
-- **Real-Time Capable**: Processes frames sequentially without looking ahead (~30 FPS)
-
-## Quick Start
-
-### Installation
-
-```bash
-# Using uv (recommended)
-uv sync
-
-# Or using pip
-pip install -e .
-```
-
-### Running the Pipeline
-
-**Step 1: Preprocess IMU data**
-
-```bash
-# Convert quaternions to Euler angles and apply bandpass filter
-python ProcessRawData.py
-```
-
-**Step 2: Match filtered data to video frames**
-
-```bash
-python BringFilteredDataAndVideoFrameDataTogeth.py --flight Flight1
-```
-
-**Step 3: Run stabilization**
-
-```bash
-python ProcessPictureFreeze.py --flight Flight1
-```
-
-Stabilized frames will be saved to `output/rotated_freeze_filt/Flight1/`
-
-## Detailed Usage
-
-### Main Script: ProcessPictureFreeze.py
-
-```bash
-python ProcessPictureFreeze.py \
-    --flight Flight1 \
-    --start-frame 0 \
-    --freeze-threshold 0.5 \
-    --pixel-per-deg 28 \
-    --output-dir output/rotated_freeze_filt
-```
-
-**Command-line arguments:**
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--flight` | Flight name (Flight1, Flight2, Flight3) | Flight1 |
-| `--start-frame` | First frame number to process | 0 |
-| `--freeze-threshold` | Freeze detection sensitivity (lower = stricter) | 0.5 |
-| `--pixel-per-deg` | Pixels per degree for pitch translation | 28 |
-| `--output-dir` | Output directory for stabilized frames | output/rotated_freeze_filt |
-
-### Preprocessing Scripts
-
-**ProcessRawData.py**
-- Converts quaternions to Euler angles (roll, pitch, yaw)
-- Applies Butterworth bandpass filter (0.3-10 Hz) to remove vibrations
-- Unwraps yaw to avoid 360° discontinuities
-- Outputs to `output/rawWithEulerAndFiltAndYawFix/`
-
-**BringFilteredDataAndVideoFrameDataTogeth.py**
-- Matches filtered sensor data to video frame timestamps
-- Uses nearest-neighbor matching with configurable tolerance (default: 5ms)
-- Ensures frame-sensor synchronization
-
-```bash
-python BringFilteredDataAndVideoFrameDataTogeth.py \
-    --flight Flight1 \
-    --tolerance 5.0
-```
+- **Frequency Separation**: Bandpass filtering separates intentional movements from vibrations
+- **Real-Time Capable**: Processes frames causally without future frame access (~30 FPS)
+- **Handles Edge Cases**: Detects and handles frozen/duplicate frames gracefully
 
 ## Algorithm Details
 
-### Bandpass Filter Design
-
-```python
-# Butterworth bandpass filter
-lowcut = 0.3 Hz   # Remove slow drift (< 0.3 Hz)
-highcut = 10 Hz   # Remove fast vibrations (> 10 Hz)
-order = 2         # Second-order for smooth response
-fs = 327.7 Hz     # IMU sampling rate
-```
-
-**Why these frequencies?**
-- Below 0.3 Hz: Slow drift and sensor bias
-- 0.3-10 Hz: **Intentional flight movements** (preserved)
-- Above 10 Hz: **Motor vibrations and turbulence** (removed)
-
-### Roll Correction
+### 1. Roll Correction
 
 Full correction applied to level the horizon:
 
 ```python
+# Extract roll from quaternion
+roll, pitch, yaw = quaternion_to_euler(qw, qx, qy, qz, degrees=True)
+
+# Rotate image to counteract roll
 rotated = rotate_image(image, -roll, output_size=(1620, 1296))
 ```
 
-- Input roll angle from IMU quaternion
-- Negated to counteract aircraft rotation
-- 1.2x larger canvas (1620x1296) prevents black borders
+- Input: Roll angle from IMU quaternion
+- Output: Image rotated to level the horizon
+- Canvas: 1.2x larger (1620×1296) to prevent black borders
 
-### Pitch Stabilization
+### 2. Pitch Stabilization
 
-Vertical translation based on **filtered** pitch:
+Vertical translation based on **bandpass-filtered** pitch:
 
 ```python
+# Apply bandpass filter to pitch signal
+pitch_filtered = butterworth_bandpass(pitch, lowcut=0.3, highcut=10, fs=327.7, order=2)
+
+# Translate image vertically
 dy = -28 * pitch_filtered  # pixels/degree × filtered pitch
-dy_clipped = np.clip(dy, -108, 108)  # Stay within borders
+dy_clipped = np.clip(dy, -108, 108)  # Stay within canvas borders
 translated = translate_image_centered(image, dx=0, dy=dy_clipped)
 ```
 
-- 28 pixels/degree calibrated for 1350x1080 resolution, ~40° FOV
-- Clipped to ±108 pixels (canvas border width)
-- Removes high-freq jitter, preserves terrain following
+- **28 pixels/degree**: Calibrated for 1350×1080 resolution, ~40° FOV
+- **Clipped to ±108 pixels**: Prevents image from leaving canvas (canvas border = 108px)
+- **Result**: Removes high-freq jitter, preserves smooth terrain following
 
-### Freeze Frame Detection
+### 3. Freeze Frame Detection
 
 Two-stage detection for efficiency:
 
-1. **Fast check**: Compare file sizes (2% tolerance)
-2. **Pixel check**: Mean absolute difference < threshold
-
-If frozen:
 ```python
-stabilized_frame = last_valid_frame.copy()  # Reuse previous stabilization
+# Stage 1: Fast file size check
+size_diff = abs(size1 - size2) / max(size1, size2)
+if size_diff < 0.02:  # 2% tolerance
+    # Stage 2: Pixel-wise comparison
+    diff = np.mean(np.abs(frame1 - frame2))
+    is_frozen = (diff < threshold)  # default: 0.5
+
+if is_frozen:
+    output = last_valid_frame.copy()  # Reuse previous stabilization
 ```
 
 This avoids artifacts from re-processing identical frames.
+
+## Performance
+
+- **Processing speed**: ~30 FPS on consumer hardware (Intel i7)
+- **Real-time capable**: Yes (causal processing, no future frames)
+- **Output quality**: Level horizon, smooth motion, preserved intentional movements
 
 ## Data Structure
 
 ```
 data/
-├── images/
-│   ├── Flight1/
-│   │   ├── 00000000.jpg
-│   │   ├── 00000001.jpg
-│   │   └── ...
-│   ├── Flight2/
-│   └── Flight3/
-├── labels/
-│   ├── Flight1.csv  # Frame-matched IMU data (qw, qx, qy, qz, etc.)
-│   ├── Flight2.csv
-│   └── Flight3.csv
-└── raw/
-    └── logs/
-        ├── Flight1.csv  # Raw IMU logs (high sampling rate)
-        ├── Flight2.csv
-        └── Flight3.csv
+├── images/Flight1/          # Input video frames (JPG)
+│   ├── 00000000.jpg
+│   ├── 00000001.jpg
+│   └── ...
+├── labels/Flight1.csv       # Frame-synchronized IMU data (qw, qx, qy, qz)
+└── raw/logs/Flight1.csv     # Raw flight logs (high-rate IMU)
 
 output/
-├── rawWithEulerAndFiltAndYawFix/        # Filtered Euler angles
+├── rawWithEulerAndFiltAndYawFix/Flight1.csv        # Filtered Euler angles
+├── relevantWithEulerAndFiltAndYawFix/Flight1/      # Frame-matched filtered data
 │   └── Flight1.csv
-├── relevantWithEulerAndFiltAndYawFix/   # Frame-matched filtered data
-│   └── Flight1/
-│       └── Flight1.csv
-└── rotated_freeze_filt/                  # Stabilized output frames
-    └── Flight1/
-        ├── 00000000.jpg
-        ├── 00000001.jpg
-        └── ...
+└── rotated_freeze_filt/Flight1/                    # Stabilized output frames
+    ├── 00000000.jpg
+    └── ...
 ```
 
-## CSV Data Format
+## Pipeline Overview
 
-**data/labels/FlightX.csv** (frame-synchronized IMU data):
-- `qw, qx, qy, qz`: Orientation quaternion (Hamilton convention)
-- `ax_mDs2, ay_mDs2, az_mDs2`: Accelerations (m/s²)
-- `wx_radDs, wy_radDs, wz_radDs`: Angular rates (rad/s)
+```
+Raw IMU Logs → ProcessRawData.py → Filtered Euler Angles
+                                           ↓
+Video Frames ← BringFilteredDataAndVideoFrameDataTogeth.py → Frame-Matched Data
+     ↓                                                              ↓
+ProcessPictureFreeze.py ←───────────────────────────────────────────┘
+     ↓
+Stabilized Frames
+```
 
-**output/.../FlightX.csv** (preprocessed data):
-- `roll, pitch, yaw`: Euler angles (degrees)
-- `roll_filtered, pitch_filtered, yaw_filtered`: Bandpass filtered angles
+## Main Scripts
 
-## Performance
+### ProcessPictureFreeze.py
+**Main stabilization algorithm**
 
-- **Processing speed**: ~30 FPS on consumer hardware (Intel i7)
-- **Real-time capable**: Yes (causal filter, no future frames needed)
-- **Output quality**: Stable horizon, smooth motion, preserved intentional movements
+```bash
+python ProcessPictureFreeze.py --flight Flight1
+```
+
+Reads video frames and IMU data, applies roll correction + filtered pitch translation, handles frozen frames.
+
+### ProcessRawData.py
+**IMU preprocessing**
+
+Converts quaternions to Euler angles, applies bandpass filter (0.3-10 Hz), unwraps yaw discontinuities.
+
+### BringFilteredDataAndVideoFrameDataTogeth.py
+**Timestamp synchronization**
+
+Matches filtered sensor data to video frame timestamps using nearest-neighbor (5ms tolerance).
+
+## Evaluation & Visualization
+
+### Quantitative Metrics
+
+```bash
+python src/evaluate.py \
+    --original-dir data/images/Flight1 \
+    --stabilized-dir output/rotated_freeze_filt/Flight1
+```
+
+Computes:
+- Inter-frame stability (motion smoothness)
+- Optical flow magnitude (residual jitter)
+- PSNR (frame quality)
+- Sharpness (detail retention)
+
+### Video Creation
+
+```bash
+python src/create_video_from_images.py \
+    --input-dir output/rotated_freeze_filt/Flight1 \
+    --output-path output/videos/Flight1_stabilized.mp4 \
+    --fps 30
+```
+
+### Interactive Visualization
+
+```bash
+python app.py
+# Access at: http://localhost:7860
+```
+
+Gradio app with side-by-side comparison, playback controls, and metric display.
 
 ## Dependencies
+
+```bash
+# Install with uv (recommended)
+uv sync
+
+# Or with pip
+pip install -e .
+```
 
 Core requirements:
 - Python 3.10+
 - numpy
 - opencv-python (cv2)
 - pandas
-- scipy
-- tqdm
+- scipy (signal processing)
+- tqdm (progress bars)
 
 See [pyproject.toml](pyproject.toml) for full dependency list.
+
+## Results
+
+Our stabilization pipeline:
+- ✅ Removes horizon tilt (roll correction)
+- ✅ Eliminates high-frequency pitch vibrations (0.3-10 Hz bandpass)
+- ✅ Preserves intentional camera movements (terrain following)
+- ✅ Handles frozen/duplicate frames gracefully
+- ⚡ Real-time capable (~30 FPS on consumer hardware)
+
+## Usage Instructions
+
+**For detailed step-by-step instructions**, including:
+- Required data format
+- Complete workflow examples
+- Video creation commands
+- Evaluation and visualization
+
+See **[SUBMISSION.md](SUBMISSION.md)**
 
 ## Repository Structure
 
@@ -231,72 +232,17 @@ See [pyproject.toml](pyproject.toml) for full dependency list.
 .
 ├── ProcessPictureFreeze.py          # Main stabilization script
 ├── ProcessRawData.py                 # IMU preprocessing (Euler + filtering)
-├── BringFilteredDataAndVideoFrameDataTogeth.py  # Frame-sensor matching
+├── BringFilteredDataAndVideoFrameDataTogeth.py  # Timestamp matching
+├── README.md                         # This file (algorithm overview)
+├── SUBMISSION.md                     # Step-by-step usage guide
+├── app.py                            # Gradio visualization app
 ├── pyproject.toml                    # Dependencies
-├── README.md                         # This file
-├── SUBMISSION.md                     # Detailed submission documentation
-├── README_evaluate.md                # Evaluation metrics documentation
-├── app.py                            # Interactive visualization tool (Gradio)
-├── src/                              # Additional utilities
-│   ├── model/                        # Baseline models (optical flow, fusion)
-│   ├── utils/                        # Dataset loaders, plotting
-│   ├── inference.py                  # Batch inference script
+├── src/
 │   ├── evaluate.py                   # Quantitative evaluation
-│   └── split_data.py                 # Train/val/test splitting
-├── config/                           # Configuration files
-├── docs/                             # Additional documentation
-└── notebooks/                        # Exploratory data analysis
+│   ├── create_video_from_images.py   # Video creation
+│   └── utils/                        # Helper functions
+└── data/                             # Input data (not included in repo)
 ```
-
-## Visualization
-
-Launch the interactive Gradio app to compare original vs stabilized videos:
-
-```bash
-python app.py
-```
-
-Features:
-- Side-by-side video comparison
-- Model selector (baseline, fusion, raw)
-- Evaluation metrics display
-- Frame-by-frame navigation
-- Video playback mode
-
-## Evaluation
-
-Run quantitative evaluation:
-
-```bash
-# Evaluate stabilized output
-python src/evaluate.py --model rotated_freeze_filt
-```
-
-Metrics computed:
-- Inter-frame stability (lower = better)
-- Optical flow smoothness
-- PSNR (peak signal-to-noise ratio)
-- Sharpness preservation
-- Cropping ratio
-- Distortion score
-
-See [README_evaluate.md](README_evaluate.md) for detailed metric descriptions.
-
-## Additional Models
-
-The repository also includes baseline optical flow models in `src/model/`:
-
-- **baseline.py**: Lucas-Kanade optical flow + RANSAC stabilization
-- **fusion.py**: Optical flow + IMU sensor fusion
-
-These can be run using:
-
-```bash
-python src/inference.py --model baseline
-python src/inference.py --model fusion
-```
-
-However, our **primary submission** is the `ProcessPictureFreeze.py` script which focuses on roll correction and high-frequency pitch stabilization.
 
 ## Future Improvements
 
@@ -306,10 +252,6 @@ Potential enhancements:
 - [ ] Online calibration of pixel-per-degree scaling
 - [ ] Learning-based filter design from training data
 - [ ] Yaw stabilization with horizon detection
-
-## License
-
-This project was developed for the UAV Video Stabilization Hackathon Challenge.
 
 ## Acknowledgments
 
