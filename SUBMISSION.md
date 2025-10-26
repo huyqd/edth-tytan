@@ -149,17 +149,151 @@ The stabilization pipeline:
 
 ## Quick Start
 
-```bash
-# 1. Preprocess data (one-time setup per flight)
-python ProcessRawData.py  # Edit script to specify flight
+### Required Data
 
-# 2. Match to frames
+Before running the pipeline, you need to provide:
+
+**1. Video frames** (JPG images)
+```
+data/images/Flight1/00000000.jpg
+data/images/Flight1/00000001.jpg
+...
+```
+
+**2. IMU sensor data** (CSV with quaternions)
+```
+data/labels/Flight1.csv
+```
+Columns required: `qw, qx, qy, qz` (orientation quaternions)
+
+**3. Raw flight logs** (CSV with high-rate IMU data)
+```
+data/raw/logs/Flight1.csv
+```
+Columns required: `timestamp, qw, qx, qy, qz` (for preprocessing)
+
+### Running the Pipeline
+
+**Note:** For Flight1, preprocessed data is already included in `output/relevantWithEulerAndFiltAndYawFix/Flight1/`, so you can skip steps 1-2 and go directly to step 3!
+
+```bash
+# STEP 1: Install dependencies
+uv sync  # or: pip install -e .
+
+# STEP 2 (OPTIONAL - already done for Flight1): Preprocess IMU data
+# Edit ProcessRawData.py to set the flight name, then run:
+python ProcessRawData.py
+
+# STEP 3 (OPTIONAL - already done for Flight1): Match filtered data to frames
 python BringFilteredDataAndVideoFrameDataTogeth.py --flight Flight1
 
-# 3. Run stabilization
+# STEP 4: Run stabilization (main algorithm!)
 python ProcessPictureFreeze.py --flight Flight1
 
 # Output will be in: output/rotated_freeze_filt/Flight1/
+```
+
+### Creating Videos from Output
+
+After stabilization, you can create viewable MP4 videos:
+
+```bash
+# Create video from stabilized frames
+python src/create_video_from_images.py \
+    --input-dir output/rotated_freeze_filt/Flight1 \
+    --output-path output/videos/Flight1_stabilized.mp4 \
+    --fps 30
+
+# Create video from original frames (for comparison)
+python src/create_video_from_images.py \
+    --input-dir data/images/Flight1 \
+    --output-path output/videos/Flight1_original.mp4 \
+    --fps 30
+```
+
+### Quantitative Evaluation
+
+Compute stabilization quality metrics:
+
+```bash
+# Evaluate stabilized output vs original
+python src/evaluate.py \
+    --original-dir data/images/Flight1 \
+    --stabilized-dir output/rotated_freeze_filt/Flight1 \
+    --output-json output/evaluation_results.json
+
+# View metrics in the JSON file
+cat output/evaluation_results.json
+```
+
+Metrics include:
+- Inter-frame stability (motion smoothness)
+- Optical flow magnitude (residual jitter)
+- PSNR (frame quality preservation)
+- Sharpness (detail retention)
+
+### Interactive Visualization
+
+Launch the Gradio web app to compare original vs stabilized videos side-by-side:
+
+```bash
+python app.py
+
+# Access at: http://localhost:7860
+```
+
+The app provides:
+- Side-by-side video comparison
+- Frame-by-frame navigation
+- Playback controls
+- Automatic metric display (if evaluation_results.json exists)
+
+## Complete Example Workflow
+
+```bash
+# 1. Install dependencies
+uv sync
+
+# 2. Run stabilization (uses pre-included preprocessed data for Flight1)
+python ProcessPictureFreeze.py --flight Flight1
+
+# 3. Create comparison videos
+python src/create_video_from_images.py \
+    --input-dir data/images/Flight1 \
+    --output-path output/videos/Flight1_original.mp4 \
+    --fps 30
+
+python src/create_video_from_images.py \
+    --input-dir output/rotated_freeze_filt/Flight1 \
+    --output-path output/videos/Flight1_stabilized.mp4 \
+    --fps 30
+
+# 4. Evaluate results
+python src/evaluate.py \
+    --original-dir data/images/Flight1 \
+    --stabilized-dir output/rotated_freeze_filt/Flight1 \
+    --output-json output/evaluation_Flight1.json
+
+# 5. Launch interactive viewer
+python app.py
+```
+
+## Processing Additional Flights
+
+For Flight2, Flight3, or custom data:
+
+```bash
+# 1. Edit ProcessRawData.py to set flight name (line 154):
+#    df = pd.read_csv('data/raw/logs/Flight2.csv')
+
+# 2. Run preprocessing
+python ProcessRawData.py
+
+# 3. Match to frames
+python BringFilteredDataAndVideoFrameDataTogeth.py --flight Flight2
+
+# 4. Run stabilization
+python ProcessPictureFreeze.py --flight Flight2
 ```
 
 ## Contact
