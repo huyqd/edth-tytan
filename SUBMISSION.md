@@ -55,14 +55,20 @@ data/raw/logs/Flight1.csv
 **Step 1a: Extract Euler angles and apply bandpass filtering**
 
 ```bash
-python ProcessRawData.py
+python ProcessRawData.py --flight Flight1
 ```
 
 This script:
 - Converts quaternions from raw flight logs to Euler angles (roll, pitch, yaw)
 - Unwraps yaw to avoid 360° discontinuities
 - Applies a Butterworth bandpass filter (0.3-10 Hz) to remove high-frequency vibrations
+- **Automatically creates output directories** if they don't exist
 - Outputs to `output/rawWithEulerAndFiltAndYawFix/<Flight>.csv`
+
+Optional parameters:
+- `--lowcut 0.3` - Low cutoff frequency (Hz)
+- `--highcut 10` - High cutoff frequency (Hz)
+- `--plot` - Show comparison plots of original vs filtered data
 
 **Step 1b: Match filtered data to video frames by timestamp**
 
@@ -184,15 +190,14 @@ The stabilization pipeline:
 
 ### Running the Pipeline
 
-**Note:** For Flight1, preprocessed data is already included in `output/relevantWithEulerAndFiltAndYawFix/Flight1/`, so you can skip steps 1-2 and go directly to step 3!
+**Note:** For Flight1, preprocessed data is already included in `output/relevantWithEulerAndFiltAndYawFix/Flight1/`, so you can skip steps 2-3 and go directly to step 4!
 
 ```bash
 # STEP 1: Install dependencies
 uv sync  # or: pip install -e .
 
 # STEP 2 (OPTIONAL - already done for Flight1): Preprocess IMU data
-# Edit ProcessRawData.py to set the flight name, then run:
-python ProcessRawData.py
+python ProcessRawData.py --flight Flight1
 
 # STEP 3 (OPTIONAL - already done for Flight1): Match filtered data to frames
 python BringFilteredDataAndVideoFrameDataTogeth.py --flight Flight1
@@ -293,16 +298,13 @@ python app.py
 For Flight2, Flight3, or custom data:
 
 ```bash
-# 1. Edit ProcessRawData.py to set flight name (line 154):
-#    df = pd.read_csv('data/raw/logs/Flight2.csv')
+# 1. Run preprocessing
+python ProcessRawData.py --flight Flight2
 
-# 2. Run preprocessing
-python ProcessRawData.py
-
-# 3. Match to frames
+# 2. Match to frames
 python BringFilteredDataAndVideoFrameDataTogeth.py --flight Flight2
 
-# 4. Run stabilization
+# 3. Run stabilization
 python ProcessPictureFreeze.py --flight Flight2
 ```
 
