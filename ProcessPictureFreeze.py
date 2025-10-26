@@ -4,6 +4,7 @@ import pandas as pd
 import math
 import os
 import glob
+import argparse
 from tqdm import tqdm
 
 
@@ -200,100 +201,163 @@ def translate_image_centered(image, dx, dy, output_size, fill_color=(0, 0, 0)):
 
     return canvas
 
-# Configuration
-FREEZE_THRESHOLD = 0.5  # Lower = stricter freeze detection
-FILE_SIZE_TOLERANCE = 0.02  # 2% tolerance for file size comparison
-
-# Path to Flight1 directory
-flight1_dir = 'data/images/Flight1'
-output_dir = 'output/rotated_freeze_filt/Flight1'  # Include Flight1 subdirectory for compatibility
-
-# Create output directory
-os.makedirs(output_dir, exist_ok=True)
-
-# Get all jpg files (automatically sorted)
-frame_paths = sorted(glob.glob(os.path.join(flight1_dir, '*.jpg')))
-
-# Read the CSV file
-df = pd.read_csv('data/labels/Flight1.csv')
-dfFilt = pd.read_csv('output/relevantWithEulerAndFiltAndYawFix/Flight1/Flight1.csv')
-
-#Correction factors
-f_c_x=1
-f_c_y=1
-pixelPdeg=28
-
-# Tracking state for frozen frame detection
-last_unfrozen_path = None
-last_unfrozen_frame = None
-last_unfrozen_rotated = None
-frozen_count = 0
-total_count = 0
-
-print(f"Processing {len(frame_paths)} frames with freeze detection...")
-print(f"Freeze threshold: {FREEZE_THRESHOLD}")
-print(f"Output directory: {output_dir}")
-print("-" * 80)
-
-for frame_path in tqdm(frame_paths, desc="Processing frames"):
-    # Extract just the filename
-    filename = os.path.basename(frame_path)
-
-    # Extract the numerical frame number
-    frame = int(os.path.splitext(filename)[0])
-
-    total_count += 1
-    is_frozen = False
-
-    # Get IMU data for this frame
-    roll, pitch, yaw = quaternion_to_euler(
-        df.iloc[frame, 2], df.iloc[frame, 3],
-        df.iloc[frame, 4], df.iloc[frame, 5],
-        degrees=True
+def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Apply roll and pitch correction to video frames with freeze detection"
+    )
+    parser.add_argument(
+        '--flight',
+        type=str,
+        default='Flight1',
+        help='Flight name (e.g., Flight1, Flight2, Flight3)'
+    )
+    parser.add_argument(
+        '--start-frame',
+        type=int,
+        default=0,
+        help='Start processing from this frame number (default: 0)'
+    )
+    parser.add_argument(
+        '--freeze-threshold',
+        type=float,
+        default=0.5,
+        help='Freeze detection threshold (default: 0.5, lower = stricter)'
+    )
+    parser.add_argument(
+        '--pixel-per-deg',
+        type=int,
+        default=28,
+        help='Pixels per degree for pitch correction (default: 28)'
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='output/rotated_freeze_filt',
+        help='Output directory (default: output/rotated_freeze_filt)'
     )
 
-    # Load current image
-    image = cv2.imread(frame_path)
+    args = parser.parse_args()
 
-    # Check if this frame is frozen (compare to last unfrozen frame)
-    if last_unfrozen_path is not None:
-        # Quick file size check first (much faster than pixel comparison)
-        size1 = os.path.getsize(last_unfrozen_path)
-        size2 = os.path.getsize(frame_path)
-        size_diff = abs(size1 - size2) / max(size1, size2) if max(size1, size2) > 0 else 1.0
+    # Configuration
+    FREEZE_THRESHOLD = args.freeze_threshold
+    FILE_SIZE_TOLERANCE = 0.02  # 2% tolerance for file size comparison
+    START_FRAME = args.start_frame
+    flight_name = args.flight
 
-        if size_diff < FILE_SIZE_TOLERANCE:
-            # File sizes similar - do pixel comparison
-            is_frozen = detect_frozen_frame(last_unfrozen_frame, image, FREEZE_THRESHOLD)
+    # Paths
+    flight_dir = f'data/images/{flight_name}'
+    output_dir = f'{args.output_dir}/{flight_name}'
 
-    if is_frozen:
-        # Frame is frozen - copy the last unfrozen rotated image
-        rotated_original = last_unfrozen_rotated.copy()
-        frozen_count += 1
-    else:
-        # Frame is not frozen - process normally
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
 
-        #use bandpass filtered pitch signal to move the image
-        #clipping because we don't want the picture to leave the image, 108 because 1080*1.2=1296, border have width of 108
-        image_translated = translate_image_centered(image, 0, np.clip(-round(pixelPdeg*f_c_y*dfFilt.loc[frame, 'pitch_filtered']),-108,108), output_size=(math.ceil(1350 * 1.2), math.ceil(1080 * 1.2)))
+    # Get all jpg files (automatically sorted)
+    all_frame_paths = sorted(glob.glob(os.path.join(flight_dir, '*.jpg')))
+    # Filter to start from START_FRAME
+    frame_paths = [p for p in all_frame_paths if int(os.path.splitext(os.path.basename(p))[0]) >= START_FRAME]
 
-        rotated_original = rotate_image(
-            image_translated,
-            -roll,
-            output_size=(math.ceil(1350*1.2), math.ceil(1080*1.2))
+    if not frame_paths:
+        print(f"Error: No frames found in {flight_dir}")
+        return
+
+    # Read the CSV files
+    csv_path = f'data/labels/{flight_name}.csv'
+    filtered_csv_path = f'output/relevantWithEulerAndFiltAndYawFix/{flight_name}/{flight_name}.csv'
+
+    if not os.path.exists(csv_path):
+        print(f"Error: CSV file not found: {csv_path}")
+        return
+
+    if not os.path.exists(filtered_csv_path):
+        print(f"Error: Filtered CSV file not found: {filtered_csv_path}")
+        return
+
+    df = pd.read_csv(csv_path)
+    dfFilt = pd.read_csv(filtered_csv_path)
+
+    # Correction factors
+    f_c_x = 1
+    f_c_y = 1
+    pixelPdeg = args.pixel_per_deg
+
+    # Tracking state for frozen frame detection
+    last_unfrozen_path = None
+    last_unfrozen_frame = None
+    last_unfrozen_rotated = None
+    frozen_count = 0
+    total_count = 0
+
+    print(f"Processing {len(frame_paths)} frames with freeze detection...")
+    print(f"Flight: {flight_name}")
+    print(f"Starting from frame: {START_FRAME}")
+    print(f"Freeze threshold: {FREEZE_THRESHOLD}")
+    print(f"Output directory: {output_dir}")
+    print("-" * 80)
+
+    for frame_path in tqdm(frame_paths, desc="Processing frames"):
+        # Extract just the filename
+        filename = os.path.basename(frame_path)
+
+        # Extract the numerical frame number
+        frame = int(os.path.splitext(filename)[0])
+
+        total_count += 1
+        is_frozen = False
+
+        # Get IMU data for this frame
+        roll, pitch, yaw = quaternion_to_euler(
+            df.iloc[frame, 2], df.iloc[frame, 3],
+            df.iloc[frame, 4], df.iloc[frame, 5],
+            degrees=True
         )
 
-        # Update last unfrozen references
-        last_unfrozen_path = frame_path
-        last_unfrozen_frame = image.copy()
-        last_unfrozen_rotated = rotated_original.copy()
+        # Load current image
+        image = cv2.imread(frame_path)
 
-    # Save the result
-    cv2.imwrite(os.path.join(output_dir, filename), rotated_original)
+        # Check if this frame is frozen (compare to last unfrozen frame)
+        if last_unfrozen_path is not None:
+            # Quick file size check first (much faster than pixel comparison)
+            size1 = os.path.getsize(last_unfrozen_path)
+            size2 = os.path.getsize(frame_path)
+            size_diff = abs(size1 - size2) / max(size1, size2) if max(size1, size2) > 0 else 1.0
 
-print("-" * 80)
-print(f"Processing complete!")
-print(f"Total frames: {total_count}")
-print(f"Frozen frames: {frozen_count} ({100.0*frozen_count/total_count:.2f}%)")
-print(f"Unfrozen frames: {total_count - frozen_count} ({100.0*(total_count-frozen_count)/total_count:.2f}%)")
-print(f"Output saved to: {output_dir}")
+            if size_diff < FILE_SIZE_TOLERANCE:
+                # File sizes similar - do pixel comparison
+                is_frozen = detect_frozen_frame(last_unfrozen_frame, image, FREEZE_THRESHOLD)
+
+        if is_frozen:
+            # Frame is frozen - copy the last unfrozen rotated image
+            rotated_original = last_unfrozen_rotated.copy()
+            frozen_count += 1
+        else:
+            # Frame is not frozen - process normally
+
+            #use bandpass filtered pitch signal to move the image
+            #clipping because we don't want the picture to leave the image, 108 because 1080*1.2=1296, border have width of 108
+            image_translated = translate_image_centered(image, 0, np.clip(-round(pixelPdeg*f_c_y*dfFilt.loc[frame, 'pitch_filtered']),-108,108), output_size=(math.ceil(1350 * 1.2), math.ceil(1080 * 1.2)))
+
+            rotated_original = rotate_image(
+                image_translated,
+                -roll,
+                output_size=(math.ceil(1350*1.2), math.ceil(1080*1.2))
+            )
+
+            # Update last unfrozen references
+            last_unfrozen_path = frame_path
+            last_unfrozen_frame = image.copy()
+            last_unfrozen_rotated = rotated_original.copy()
+
+        # Save the result
+        cv2.imwrite(os.path.join(output_dir, filename), rotated_original)
+
+    print("-" * 80)
+    print(f"Processing complete!")
+    print(f"Total frames: {total_count}")
+    print(f"Frozen frames: {frozen_count} ({100.0*frozen_count/total_count:.2f}%)")
+    print(f"Unfrozen frames: {total_count - frozen_count} ({100.0*(total_count-frozen_count)/total_count:.2f}%)")
+    print(f"Output saved to: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()

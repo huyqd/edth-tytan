@@ -13,3 +13,18 @@ res
 .DS_Store
 *.jpg
 output/
+
+# Internal development documentation
+CLAUDE.md
+benchmark_results.json
+
+# Debug and test files
+debug_*.py
+debug_*.png
+test_*.py
+test_*.png
+diagnose_*.py
+compare_*.py
+example_*.py
+*.png
+diagnostic_*.png

@@ -116,20 +116,19 @@ def get_split_frame_indices(split_config, split_set='test'):
     }
 
 
-def should_process_frame(frame_path, split_indices):
+def should_process_frame(frame_path, split_indices, filter_flight=None, start_frame=0):
     """
-    Check if a frame should be processed based on split.
+    Check if a frame should be processed based on split, flight filter, and start frame.
 
     Args:
         frame_path: Path to frame image
         split_indices: dict of {flight_name: set of frame indices}
+        filter_flight: Optional flight name to filter (e.g., 'Flight1_stabilized')
+        start_frame: Minimum frame number to process (default: 0)
 
     Returns:
         bool: True if frame should be processed
     """
-    if split_indices is None:
-        return True  # No split specified, process all
-
     # Extract flight name and frame index from path
     path_parts = frame_path.split(os.sep)
     flight_name = path_parts[-2]
@@ -139,6 +138,18 @@ def should_process_frame(frame_path, split_indices):
         frame_idx = int(frame_name)
     except ValueError:
         return False
+
+    # Check flight filter
+    if filter_flight is not None and flight_name != filter_flight:
+        return False
+
+    # Check start frame
+    if frame_idx < start_frame:
+        return False
+
+    # Check split indices
+    if split_indices is None:
+        return True  # No split specified, process all (that pass other filters)
 
     if flight_name not in split_indices:
         return False
@@ -212,6 +223,20 @@ Examples:
         help='Maximum number of features to track (default: 2000). Lower for faster processing.'
     )
 
+    parser.add_argument(
+        '--filter-flight',
+        type=str,
+        default=None,
+        help='Only process frames from this specific flight (e.g., Flight1_stabilized)'
+    )
+
+    parser.add_argument(
+        '--start-frame',
+        type=int,
+        default=0,
+        help='Start processing from this frame number (default: 0)'
+    )
+
     args = parser.parse_args()
 
     # Set default output name to model name if not specified
@@ -247,6 +272,12 @@ Examples:
         raise ValueError(f"Unknown model: {args.model}")
 
     print(f"Max features: {args.max_features}")
+
+    # Print filter settings
+    if args.filter_flight:
+        print(f"Flight filter: {args.filter_flight}")
+    if args.start_frame > 0:
+        print(f"Start frame: {args.start_frame}")
 
     # Load data split if provided
     split_indices = None
@@ -331,10 +362,9 @@ Examples:
         window_frames = [dataset.img_files[j] for j in range(i - window, i)]
 
         # Skip window if no frames should be processed
-        if split_indices is not None:
-            frames_to_process = [f for f in window_frames if should_process_frame(f, split_indices)]
-            if not frames_to_process:
-                continue  # Skip this window entirely
+        frames_to_process = [f for f in window_frames if should_process_frame(f, split_indices, args.filter_flight, args.start_frame)]
+        if not frames_to_process:
+            continue  # Skip this window entirely
 
         mid_idx = i - (window // 2 + 1) if window > 2 else i - window // 2
         ref_frame_path = dataset.img_files[mid_idx]
@@ -382,8 +412,8 @@ Examples:
         for j_idx, j in enumerate(range(i - stride, i)):
             img_path = dataset.img_files[j]
 
-            # Skip if frame not in split
-            if split_indices is not None and not should_process_frame(img_path, split_indices):
+            # Skip if frame should not be processed
+            if not should_process_frame(img_path, split_indices, args.filter_flight, args.start_frame):
                 continue
 
             # Extract flight name from path (e.g., "data/images/Flight1/00000000.png" -> "Flight1")
