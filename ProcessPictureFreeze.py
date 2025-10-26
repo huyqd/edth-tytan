@@ -148,6 +148,57 @@ def detect_frozen_frame(frame1, frame2, threshold=0.5):
     diff = np.mean(np.abs(frame1_gray.astype(float) - frame2_gray.astype(float)))
     return diff < threshold
 
+def translate_image_centered(image, dx, dy, output_size, fill_color=(0, 0, 0)):
+    """
+    Center an image in a larger canvas, then translate it.
+
+    Args:
+        image: Input image (numpy array)
+        dx: Horizontal translation in pixels from center
+        dy: Vertical translation in pixels from center
+        output_size: Tuple (width, height) for output canvas size
+        fill_color: Border color (default: black)
+
+    Returns:
+        numpy array: Translated image centered in canvas with borders
+    """
+    orig_height, orig_width = image.shape[:2]
+    out_width, out_height = int(output_size[0]), int(output_size[1])
+
+    # Calculate position to center the image
+    center_x = (out_width - orig_width) // 2
+    center_y = (out_height - orig_height) // 2
+
+    # Add translation offset
+    final_x = center_x + dx
+    final_y = center_y + dy
+
+    # Create black canvas
+    if image.ndim == 3:
+        canvas = np.full((out_height, out_width, image.shape[2]),
+                         fill_color, dtype=image.dtype)
+    else:
+        canvas = np.full((out_height, out_width),
+                         fill_color[0], dtype=image.dtype)
+
+    # Calculate valid region to paste
+    src_x1 = max(0, -final_x)
+    src_y1 = max(0, -final_y)
+    src_x2 = min(orig_width, out_width - final_x)
+    src_y2 = min(orig_height, out_height - final_y)
+
+    dst_x1 = max(0, final_x)
+    dst_y1 = max(0, final_y)
+    dst_x2 = dst_x1 + (src_x2 - src_x1)
+    dst_y2 = dst_y1 + (src_y2 - src_y1)
+
+    # Paste image onto canvas
+    if image.ndim == 3:
+        canvas[dst_y1:dst_y2, dst_x1:dst_x2, :] = image[src_y1:src_y2, src_x1:src_x2, :]
+    else:
+        canvas[dst_y1:dst_y2, dst_x1:dst_x2] = image[src_y1:src_y2, src_x1:src_x2]
+
+    return canvas
 
 # Configuration
 FREEZE_THRESHOLD = 0.5  # Lower = stricter freeze detection
@@ -155,7 +206,7 @@ FILE_SIZE_TOLERANCE = 0.02  # 2% tolerance for file size comparison
 
 # Path to Flight1 directory
 flight1_dir = 'data/images/Flight1'
-output_dir = 'output/rotated_freeze/Flight1'  # Include Flight1 subdirectory for compatibility
+output_dir = 'output/rotated_freeze_filt/Flight1'  # Include Flight1 subdirectory for compatibility
 
 # Create output directory
 os.makedirs(output_dir, exist_ok=True)
@@ -165,6 +216,12 @@ frame_paths = sorted(glob.glob(os.path.join(flight1_dir, '*.jpg')))
 
 # Read the CSV file
 df = pd.read_csv('data/labels/Flight1.csv')
+dfFilt = pd.read_csv('output/relevantWithEulerAndFiltAndYawFix/Flight1/Flight1.csv')
+
+#Correction factors
+f_c_x=1
+f_c_y=1
+pixelPdeg=28
 
 # Tracking state for frozen frame detection
 last_unfrozen_path = None
@@ -215,8 +272,13 @@ for frame_path in tqdm(frame_paths, desc="Processing frames"):
         frozen_count += 1
     else:
         # Frame is not frozen - process normally
+
+        #use bandpass filtered pitch signal to move the image
+        #clipping because we don't want the picture to leave the image, 108 because 1080*1.2=1296, border have width of 108
+        image_translated = translate_image_centered(image, 0, np.clip(-round(pixelPdeg*f_c_y*dfFilt.loc[frame, 'pitch_filtered']),-108,108), output_size=(math.ceil(1350 * 1.2), math.ceil(1080 * 1.2)))
+
         rotated_original = rotate_image(
-            image,
+            image_translated,
             -roll,
             output_size=(math.ceil(1350*1.2), math.ceil(1080*1.2))
         )
